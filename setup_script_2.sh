@@ -128,7 +128,9 @@ server {
         proxy_set_header   Host \$host;
     }
 }"
-sed -i "/http {/a $nginx_config_to_append" "$nginx_conf"
+while IFS= read -r line; do
+    sed -i "/http {/a $line" "$nginx_conf"
+done <<< "$nginx_config_to_append"
 
 # Reload Nginx
 echo "Reloading nginx..."
