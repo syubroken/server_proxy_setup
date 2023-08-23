@@ -36,7 +36,7 @@ echo "Installing acme.sh and registering account..."
 curl https://get.acme.sh | sh
 export CF_Email="senyz2040@163.com"
 echo -n "Enter your Cloudflare API Key: "
-read -s CF_Key
+read CF_Key
 echo
 export CF_Key
 ~/.acme.sh/acme.sh --register-account -m $CF_Email
