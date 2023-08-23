@@ -128,9 +128,20 @@ server {
         proxy_set_header   Host \$host;
     }
 }"
-while IFS= read -r line; do
-    sed -i "/http {/a $line" "$nginx_conf"
-done <<< "$nginx_config_to_append"
+
+# 先备份原始nginx.conf
+cp "$nginx_conf" "${nginx_conf}.bak"
+
+# 使用awk将nginx.conf的内容分割并将$nginx_config_to_append插入到适当的位置
+awk -v append="$nginx_config_to_append" '
+  /http {/ {
+    print
+    print append
+    next
+  }
+  1
+' "${nginx_conf}.bak" > "$nginx_conf"
+
 
 # Reload Nginx
 echo "Reloading nginx..."
