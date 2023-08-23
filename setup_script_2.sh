@@ -43,9 +43,13 @@ export CF_Key
 
 # Issue SSL certificate and configure nginx
 echo "Issuing SSL certificate and configuring nginx..."
+
+systemctl stop nginx
 ~/.acme.sh/acme.sh --issue -d senyzloss.life --standalone -k ec-256
-systemctl enable nginx
+
 systemctl start nginx
+systemctl enable nginx
+
 
 # Install V2Ray
 echo "Installing V2Ray..."
