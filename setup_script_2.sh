@@ -1,11 +1,13 @@
 #!/bin/bash
 
 # Update and upgrade packages
+echo "Updating and upgrading packages..."
 apt-get update
 apt-get upgrade -y
 
 # Install required packages
-apt-get install -y vim ufw socat
+echo "Installing required packages..."
+apt-get install -y vim ufw socat nginx
 
 # Create and write to .vimrc
 cat > ~/.vimrc <<EOF
@@ -24,26 +26,30 @@ syntax on
 EOF
 
 # Enable and configure UFW
+echo "Configuring UFW..."
 ufw enable
 ufw allow 80/tcp
 ufw allow 443/tcp
 
 # Install acme.sh and register account
+echo "Installing acme.sh and registering account..."
 curl https://get.acme.sh | sh
 export CF_Email="senyz2040@163.com"
-echo "Enter your Cloudflare API Key:"
-read CF_Key
+echo -n "Enter your Cloudflare API Key: "
+read -s CF_Key
+echo
 export CF_Key
 ~/.acme.sh/acme.sh --register-account -m $CF_Email
 
 # Issue SSL certificate and configure nginx
+echo "Issuing SSL certificate and configuring nginx..."
 ~/.acme.sh/acme.sh --issue -d senyzloss.life --standalone -k ec-256
-apt-get install -y nginx
 systemctl enable nginx
 systemctl start nginx
 
 # Install V2Ray
-mkdir /etc/v2ray
+echo "Installing V2Ray..."
+mkdir -p /etc/v2ray
 ~/.acme.sh/acme.sh --installcert -d senyzloss.life \
 --ecc --fullchain-file /etc/v2ray/v2ray.crt \
 --key-file /etc/v2ray/v2ray.key \
@@ -56,6 +62,7 @@ systemctl enable v2ray
 uuid=$(cat /proc/sys/kernel/random/uuid)
 
 # Create V2Ray config file
+echo "Configuring V2Ray..."
 config_path="/usr/local/etc/v2ray/config.json"
 cat > "$config_path" <<EOF
 {
@@ -80,7 +87,6 @@ cat > "$config_path" <<EOF
 			}
 		}
 	],
-
 	"outbounds": [
 		{
 			"protocol": "freedom",
@@ -91,6 +97,7 @@ cat > "$config_path" <<EOF
 EOF
 
 # Append Nginx configuration to nginx.conf http block
+echo "Configuring nginx..."
 nginx_conf="/etc/nginx/nginx.conf"
 nginx_config_to_append="
 server {
@@ -117,16 +124,21 @@ server {
         proxy_set_header   Host \$host;
     }
 }"
-
-# Insert nginx_config_to_append into nginx.conf http block
 sed -i "/http {/a $nginx_config_to_append" "$nginx_conf"
 
 # Reload Nginx
+echo "Reloading nginx..."
 nginx -s reload
 
 # Restart V2Ray
+echo "Restarting V2Ray..."
 systemctl restart v2ray
 
 # Print UUID and port
+echo "==============================================="
+echo "Setup Complete!"
 echo "Generated UUID: $uuid"
 echo "Port: 443"
+echo "==============================================="
+
+exit 0
