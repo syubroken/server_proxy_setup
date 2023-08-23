@@ -142,7 +142,6 @@ awk -v append="$nginx_config_to_append" '
   1
 ' "${nginx_conf}.bak" > "$nginx_conf"
 
-
 # Reload Nginx
 echo "Reloading nginx..."
 nginx -s reload
