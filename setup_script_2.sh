@@ -58,7 +58,7 @@ mkdir -p /etc/v2ray
 --ecc --fullchain-file /etc/v2ray/v2ray.crt \
 --key-file /etc/v2ray/v2ray.key \
 --reloadcmd "service nginx force-reload"
-bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh) --version v4.45.0
+bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
 bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-dat-release.sh)
 systemctl enable v2ray
 
