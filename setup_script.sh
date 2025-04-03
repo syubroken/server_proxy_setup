@@ -11,7 +11,7 @@ apt-get upgrade -y
 
 # Install required packages
 echo "Installing required packages..."
-apt-get install -y vim ufw socat nginx curl
+apt-get install -y vim ufw socat nginx
 
 # Create and write to .vimrc
 cat > ~/.vimrc <<EOF
