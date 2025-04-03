@@ -97,38 +97,9 @@ cat > "$config_path" <<EOF
 	"outbounds": [
 		{
 			"protocol": "freedom",
-			"settings": {},
-            "tag": "direct"
-		},
-        {
-            "protocol": "socks",
-            "settings": {
-                "servers": [
-                {
-                    "address": "127.0.0.1",
-                    "port": 40000
-                }
-                ]
-            },
-            "tag": "warp-out"
-        }
-	],
-    "routing": {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [
-            {
-                "type": "field",
-                "domain": [
-                    "geosite:openai",
-                    "anthropic.com",
-                    "api.anthropic.com",
-                    "claude.ai",
-                    "ping0.cc"
-                ],
-                "outboundTag": "warp-out"
-            }
-        ]
-    }
+			"settings": {}
+		}
+	]
 }
 EOF
 
