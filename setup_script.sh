@@ -60,7 +60,7 @@ mkdir -p /etc/v2ray
 ~/.acme.sh/acme.sh --installcert -d $USER_DOMAIN \
 --ecc --fullchain-file /etc/v2ray/v2ray.crt \
 --key-file /etc/v2ray/v2ray.key \
---reloadcmd "service nginx force-reload"
+--reloadcmd "systemctl restart v2ray && if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi"
 bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
 bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-dat-release.sh)
 systemctl enable v2ray
