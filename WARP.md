@@ -14,7 +14,7 @@ bash <(curl -fsSL git.io/warp.sh) d
 - amd64 或 arm64
 - 使用 systemd 的服务器
 - 服务器通过 V2Ray 提供代理服务，默认服务名为 `v2ray`
-- 建议在下一次干净重装、完成 `setup_script.sh` 后使用
+- 建议在下一次干净重装、完成 V2Ray 与 Nginx 基础配置后使用
 
 如果脚本发现 `/etc/wireguard/wgcf.conf` 或 `wg-quick@wgcf`，会主动停止安装。这样做是为了避免在当前 SSH 会话里同时切换两套全局路由。当前运行稳定的旧服务器不必为了换脚本立即迁移。
 
@@ -32,15 +32,19 @@ Cloudflare 文档记录了本地代理模式的请求超时限制。ChatGPT、Co
 
 ## 首次安装
 
-先确认服务器是刚重装并已完成基础代理配置，然后执行：
+当前 `2.0.0` 版本已经通过 Bash 语法检查和代码复核，但还没有在真实 Debian 服务器上执行过。第一次实机使用时，请同时保留两个 SSH 窗口，并事先确认可以从 DMIT 网页控制台进入服务器。
+
+先确认服务器是刚重装并已完成基础代理配置，然后下载已经核验的固定提交，而不是会继续变化的 `main`：
 
 ```bash
-curl -fsSLo warp.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/main/warp.sh
+WARP_COMMIT="da777a2d70f55c29951fe27f12e02670fc4e2577"
+curl -fsSLo warp.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${WARP_COMMIT}/warp.sh"
+echo "d9dfe54c28e0fd73ddb70f7b3895a0b36799d1e2be1b084fe221cc84438b7772  warp.sh" | sha256sum -c -
 chmod 700 warp.sh
 ./warp.sh install
 ```
 
-脚本会显示即将发生的变化。输入大写 `YES` 后才会连接 WARP。
+校验结果必须显示 `warp.sh: OK`。脚本随后会显示即将发生的变化，输入大写 `YES` 后才会连接 WARP。安装结束前不要关闭原来的 SSH 窗口。
 
 自动部署时可以使用：
 
@@ -142,6 +146,7 @@ WARP_PROTOCOL=WireGuard ./warp.sh repair
 
 - Cloudflare WARP Linux：<https://developers.cloudflare.com/warp-client/get-started/linux/>
 - Cloudflare WARP 模式：<https://developers.cloudflare.com/warp-client/warp-modes/>
+- Cloudflare 客户端模式与本地代理限制：<https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/configure/modes/>
 - Cloudflare Linux 软件源：<https://pkg.cloudflareclient.com/>
 
 脚本版本：`2.0.0`（2026-07-15）
