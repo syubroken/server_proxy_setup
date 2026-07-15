@@ -9,3 +9,5 @@
 - `WARP.md`：`warp.sh` 的适用范围、安装步骤、故障处理和风险边界。
 
 首次使用 WARP 前请先阅读 [WARP.md](WARP.md)。不要再执行旧的 `git.io/warp.sh` 短链接命令。
+
+`warp.sh` 2.0.0 已完成静态校验，尚未在真实 Debian 服务器上执行。第一次使用应保留第二个 SSH 会话，并确认 DMIT 网页控制台可用。
