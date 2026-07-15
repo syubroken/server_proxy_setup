@@ -28,7 +28,42 @@ bash <(curl -fsSL git.io/warp.sh) d
 
 ## 为什么不用 WARP 本地代理模式
 
-Cloudflare 文档记录了本地代理模式的请求超时限制。ChatGPT、Codex 和其他实时应用会使用长连接，因此本脚本使用全隧道模式，不把 V2Ray 接到 WARP 的本地 HTTP/SOCKS 代理端口。
+你以前执行的：
+
+```text
+bash <(curl -fsSL git.io/warp.sh) s5
+```
+
+并不是让整个服务器自动经过 SOCKS5。旧第三方脚本中的 `s5` 会安装 Cloudflare 官方客户端、切换到代理模式，并在 `127.0.0.1:40000` 提供本地代理；V2Ray 还必须另外配置 SOCKS 出站和分流规则。
+
+旧笔记中的 V2Ray 规则只匹配了 `openai.com`。OpenAI 当前公布的网络要求还包含 `*.chatgpt.com`、`*.auth.openai.com`、`*.oaistatic.com`、`*.oaiusercontent.com` 等域名。ChatGPT 和 Codex 还使用 TCP 443 上的安全 WebSocket；代理不能阻止、改写或过早关闭这些长连接。因此，当年可能出现了“网页部分请求能打开，但登录、资源、流式响应或任务连接失败”的情况。
+
+Cloudflare 当前的 Cloudflare One Client 文档仍提供本地 SOCKS5/HTTP 代理，默认端口也是 `40000`，但同时明确记录：本地代理模式的单次请求超过 10 秒会被断开。该说明不能反向证明你当年使用的消费版客户端内部实现完全相同，但它与 ChatGPT/Codex 的长连接要求明显冲突。
+
+因此，SOCKS5 现在仍可用于普通短请求和特定应用分流，但不作为本仓库面向 ChatGPT/Codex 的推荐方案。`warp.sh` 继续使用官方全隧道模式，让 V2Ray 的全部相关域名和长连接自然经过 WARP，不再维护容易遗漏的 OpenAI 域名清单。
+
+## 只读检查旧 SOCKS5 方案
+
+仓库中的 `warp_proxy_probe.sh` 只测试一个**已经存在**的 `127.0.0.1:40000` 代理，不会安装客户端、启用代理模式、修改 V2Ray、切换路由或改防火墙。它也不读取或发送账号令牌、Cookie、API Key 和私钥。
+
+使用固定提交下载并校验：
+
+```bash
+PROBE_COMMIT="2f3a477f813504cfcaa4a1a682aa8c26cf2930e1"
+curl -fsSLo warp_proxy_probe.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${PROBE_COMMIT}/warp_proxy_probe.sh"
+echo "79bd3500a661d0fea064b4e94e6ddd5f21f2e95ab376b9da1174e8cd9298ddc3  warp_proxy_probe.sh" | sha256sum -c -
+chmod 700 warp_proxy_probe.sh
+./warp_proxy_probe.sh
+```
+
+如何理解结果：
+
+- 当前旧服务器采用 `wgcf` 全隧道时，通常没有 `warp-cli` 和 `40000` 监听；脚本会安全退出，这不是故障。
+- 普通 HTTPS 与 OpenAI 检查通过，只能证明 SOCKS5 基本可达，不能证明 ChatGPT/Codex 长连接稳定。
+- 受控长请求在约 10 秒结束，与 Cloudflare 当前文档记录的限制相符。
+- 即使长请求通过，也仍需在一次性测试服务器上完成至少 15 分钟的真实 App 会话，才能观察 WebSocket 重连。
+
+不要为了运行这个探针，在当前稳定服务器上重新执行旧 `s5` 命令。真正的代理模式 A/B 测试应放在一次性测试服务器或下一次干净重装后的验证阶段；目前没有必要为了证明已知风险而改变生产线路。
 
 ## 首次安装
 
@@ -148,5 +183,7 @@ WARP_PROTOCOL=WireGuard ./warp.sh repair
 - Cloudflare WARP 模式：<https://developers.cloudflare.com/warp-client/warp-modes/>
 - Cloudflare 客户端模式与本地代理限制：<https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/configure/modes/>
 - Cloudflare Linux 软件源：<https://pkg.cloudflareclient.com/>
+- OpenAI 的 ChatGPT/Codex 网络与 WebSocket 要求：<https://help.openai.com/en/articles/9247338-network-recommendations-for-chatgpt-errors-on-web-and-apps>
+- 旧 P3TERX 脚本源代码：<https://github.com/P3TERX/warp.sh/blob/main/warp.sh>
 
 脚本版本：`2.0.0`（2026-07-15）
