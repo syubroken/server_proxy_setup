@@ -5,7 +5,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="2.0.1"
+SCRIPT_VERSION="2.0.2"
 DOMAIN="senyz.top"
 EMAIL=""
 ENABLE_WARP=1
@@ -223,9 +223,19 @@ if (( dns_matches == 0 )); then
 fi
 
 challenge_name="senyz-${timestamp}"
-printf '%s' "$challenge_name" > "${WEBROOT}/.well-known/acme-challenge/${challenge_name}"
+challenge_file="${WEBROOT}/.well-known/acme-challenge/${challenge_name}"
+printf '%s' "$challenge_name" > "$challenge_file"
+chmod 644 "$challenge_file"
+local_challenge_result="$(curl --noproxy '*' -fsS --max-time 10 \
+    --resolve "${DOMAIN}:80:127.0.0.1" \
+    "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" || true)"
+if [[ "$local_challenge_result" != "$challenge_name" ]]; then
+    tail -n 20 /var/log/nginx/error.log >&2 || true
+    rm -f "$challenge_file"
+    die 'The local Nginx HTTP challenge path failed.'
+fi
 challenge_result="$(curl -4 -fsS --max-time 20 "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" || true)"
-rm -f "${WEBROOT}/.well-known/acme-challenge/${challenge_name}"
+rm -f "$challenge_file"
 [[ "$challenge_result" == "$challenge_name" ]] \
     || die 'Port 80 or the HTTP challenge path is not reachable from the Internet.'
 
