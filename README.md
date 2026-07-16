@@ -14,4 +14,6 @@
 
 日常操作先阅读 [REBUILD.md](REBUILD.md)。首次使用 WARP 前再阅读 [WARP.md](WARP.md)。不要再执行旧的 `git.io/warp.sh` 短链接命令。
 
+`repair_current_server.sh` 1.0.3 已于 2026-07-16 在当前 DMIT Debian 12 服务器完整执行成功。
+
 `warp.sh` 2.0.0 已完成静态校验，尚未在真实 Debian 服务器上执行。第一次使用应保留第二个 SSH 会话，并确认 DMIT 网页控制台可用。
