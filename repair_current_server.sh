@@ -5,13 +5,14 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 DOMAIN="senyz.top"
 ASSUME_YES=0
 WEBROOT="/var/www/senyz-acme"
 ACME_BIN="/root/.acme.sh/acme.sh"
 ACME_HTTP_CONF="/etc/nginx/conf.d/senyz-acme-http.conf"
 TIMEOUT_CONF="/etc/nginx/conf.d/senyz-proxy-timeouts.conf"
+LOG_FILE="/root/senyz-current-repair.log"
 BACKUP_DIR=""
 
 log() {
@@ -101,6 +102,7 @@ if (( ASSUME_YES == 0 )); then
     [[ "$answer" == 'YES' ]] || die 'Cancelled.'
 fi
 
+exec > >(tee -a "$LOG_FILE") 2>&1
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="/root/senyz-current-repair-${timestamp}"
 mkdir -p "$BACKUP_DIR"
@@ -136,7 +138,7 @@ restore_nginx() {
     nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
 }
 
-trap 'rc=$?; warn "Repair stopped at line ${LINENO} with exit code ${rc}. Backup: ${BACKUP_DIR}"; exit "$rc"' ERR
+trap 'rc=$?; warn "Repair stopped at line ${LINENO} with exit code ${rc}. Backup: ${BACKUP_DIR}. Log: ${LOG_FILE}"; exit "$rc"' ERR
 
 log 'Installing the small set of maintenance packages.'
 export DEBIAN_FRONTEND=noninteractive
@@ -224,6 +226,7 @@ Domain: ${DOMAIN}
 Certificate file: ${CERT_FILE}
 Private key file: ${KEY_FILE}
 Backup: ${BACKUP_DIR}
+Log: ${LOG_FILE}
 
 ${certificate_info}
 
@@ -237,4 +240,5 @@ chmod 600 /root/senyz-current-repair-result.txt
 
 printf '\nRepair complete.\n'
 printf 'Backup: %s\n' "$BACKUP_DIR"
+printf 'Log: %s\n' "$LOG_FILE"
 printf 'Result: /root/senyz-current-repair-result.txt\n'
