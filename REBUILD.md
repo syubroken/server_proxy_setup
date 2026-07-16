@@ -76,9 +76,9 @@ ssh-keygen -R 154.26.183.116
 登录全新的 Debian 后执行：
 
 ```bash
-REBUILD_COMMIT="59e87f0640cfbbf6feac0fad5d93573a59a5a5c3"
+REBUILD_COMMIT="9866347e62262caafbeb1a7d54582b6208b872b4"
 curl -fsSLo rebuild_server.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${REBUILD_COMMIT}/rebuild_server.sh"
-echo "306161802f93aa4b48876df88f4070876474c4f8257e22013235dd1ddcaa7198  rebuild_server.sh" | sha256sum -c -
+echo "5dc4122aa98822006f0a6e9c2ccf732f12dd79634e3e291b6ebe35cadb170224  rebuild_server.sh" | sha256sum -c -
 chmod 700 rebuild_server.sh
 ./rebuild_server.sh --domain senyz.top --email "你的证书通知邮箱" --with-warp
 ```
@@ -92,6 +92,7 @@ chmod 700 rebuild_server.sh
 - 配置 VMess + WebSocket + TLS 和一小时长连接。
 - 生成新的 UUID 和 `vmess://` 一键导入链接。
 - 安装仓库中经过复核的官方 WARP 全隧道管理脚本。
+- 在最终 WARP 出口下只读检查 ChatGPT、Claude 和 Google AI Studio 入口页的基本 HTTPS 可达性，不登录账号。
 
 完成后客户端资料保存在：
 
@@ -101,11 +102,13 @@ cat /root/senyz-client.txt
 
 复制其中的 `vmess://` 链接，可导入 v2rayN 或 Shadowrocket。日志保存在 `/root/senyz-rebuild.log`。
 
+三项 AI 服务的网络检查结果保存在 `/root/senyz-ai-reachability.txt`。`2xx`、`3xx`、`401`、`403` 或 `429` 只表示已经到达服务端，不等于账号、地区或登录一定可用。
+
 新脚本只允许在干净系统上运行。如果中途失败并且你不想排查，直接再次重装 Debian，然后从本节开头重新执行；不要在旧系统上强制覆盖。
 
 ## 五、当前已知边界
 
 - 旧 `setup_script.sh` 保持不变，仅作为历史备份，不再作为推荐安装入口。
 - 当前稳定服务器暂不迁移旧 `wgcf` WARP；只运行第一节的一次性修复。
-- 当前修复脚本 `1.0.3` 已通过真实 DMIT Debian 12 验收。完整重建脚本 `2.0.2` 和新版 WARP 安装流程仍只完成静态检查；第一次重装使用时必须保留第二个 SSH 窗口和 DMIT 控制台。
+- 当前修复脚本 `1.0.3` 已通过真实 DMIT Debian 12 验收。完整重建脚本 `2.0.3` 和新版 WARP 安装流程仍只完成静态检查；第一次重装使用时必须保留第二个 SSH 窗口和 DMIT 控制台。
 - WARP、VPS 或代理协议都不能保证 AI 账号地区合规或绝对安全；本方案解决的是服务器安全、续期和网络可靠性。
