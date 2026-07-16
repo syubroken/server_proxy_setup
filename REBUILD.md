@@ -103,6 +103,5 @@ cat /root/senyz-client.txt
 
 - 旧 `setup_script.sh` 保持不变，仅作为历史备份，不再作为推荐安装入口。
 - 当前稳定服务器暂不迁移旧 `wgcf` WARP；只运行第一节的一次性修复。
-- 新脚本已通过 Bash 语法、V2Ray JSON、固定版本和敏感信息静态检查，但尚未在真实 DMIT Debian 上完整执行。第一次使用必须保留第二个 SSH 窗口和 DMIT 控制台。
+- 新脚本已通过 Bash 语法、V2Ray JSON、固定脚本来源、文件校验和敏感信息静态检查，但尚未在真实 DMIT Debian 上完整执行。第一次使用必须保留第二个 SSH 窗口和 DMIT 控制台。
 - WARP、VPS 或代理协议都不能保证 AI 账号地区合规或绝对安全；本方案解决的是服务器安全、续期和网络可靠性。
-
