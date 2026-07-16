@@ -5,7 +5,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 DOMAIN="senyz.top"
 ASSUME_YES=0
 WEBROOT="/var/www/senyz-acme"
@@ -193,11 +193,27 @@ systemctl reload nginx
 
 log 'Checking that the public HTTP challenge path reaches this server.'
 challenge_name="senyz-${timestamp}"
-printf '%s' "$challenge_name" > "${WEBROOT}/.well-known/acme-challenge/${challenge_name}"
-challenge_result="$(curl -4 -fsS --max-time 20 "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" || true)"
-rm -f "${WEBROOT}/.well-known/acme-challenge/${challenge_name}"
-[[ "$challenge_result" == "$challenge_name" ]] \
-    || die 'The HTTP challenge path is not reachable. Check DNS, Cloudflare proxy status, port 80, and UFW.'
+challenge_file="${WEBROOT}/.well-known/acme-challenge/${challenge_name}"
+printf '%s' "$challenge_name" > "$challenge_file"
+chmod 644 "$challenge_file"
+
+local_challenge_result="$(curl --noproxy '*' -fsS --max-time 10 \
+    --resolve "${DOMAIN}:80:127.0.0.1" \
+    "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" || true)"
+if [[ "$local_challenge_result" != "$challenge_name" ]]; then
+    tail -n 20 /var/log/nginx/error.log >&2 || true
+    rm -f "$challenge_file"
+    die 'The local Nginx challenge path failed. The certificate was not changed.'
+fi
+
+public_challenge_result="$(curl --noproxy '*' -4 -fsS --max-time 20 \
+    "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" || true)"
+rm -f "$challenge_file"
+if [[ "$public_challenge_result" == "$challenge_name" ]]; then
+    log 'The public HTTP challenge path is reachable.'
+else
+    warn 'The local challenge passed, but the server could not read itself through the public WARP route. Continuing with the certificate authority as the authoritative external test.'
+fi
 
 log 'Issuing a replacement certificate through the webroot method.'
 "$ACME_BIN" --issue --domain "$DOMAIN" --webroot "$WEBROOT" --ecc --force
