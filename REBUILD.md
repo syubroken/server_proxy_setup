@@ -15,9 +15,9 @@
 先保持 DMIT 控制台可用，并另外打开第二个 SSH 窗口。然后在服务器中执行：
 
 ```bash
-REPAIR_COMMIT="c8670759751ef4031fdb3aadf01314440ceca647"
+REPAIR_COMMIT="2265511e101091d9adcabf85cef3fb7db0fbf2cc"
 curl -fsSLo repair_current_server.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${REPAIR_COMMIT}/repair_current_server.sh"
-echo "3c8d3201344baa6fd419ee2c7da52de11962b07744465873397b6730caa293df  repair_current_server.sh" | sha256sum -c -
+echo "b3e9215bae7ae34ec7924067e91e17d3459fed159a347657704b946d57509017  repair_current_server.sh" | sha256sum -c -
 chmod 700 repair_current_server.sh
 ./repair_current_server.sh --domain senyz.top
 ```
@@ -33,6 +33,8 @@ chmod 700 repair_current_server.sh
 - 自动备份旧配置并保存日志。
 
 它不修改 V2Ray 配置、SSH 密钥、防火墙规则或当前 WARP 路由。成功时最后会显示 `Repair complete`。失败时保留当前 SSH 窗口，不要反复执行，把 `/root/senyz-current-repair.log` 的内容用于排查。
+
+如果曾运行 `1.0.2` 并在 HTTP challenge 的 `404` 处停止，可以直接下载上面的新版重新执行。已经完成的软件安装和 Nginx 安全设置是可重复的，新版会继续完成证书步骤。
 
 ## 二、平时登录服务器
 
@@ -72,9 +74,9 @@ ssh-keygen -R 154.26.183.116
 登录全新的 Debian 后执行：
 
 ```bash
-REBUILD_COMMIT="c22c5043e66d3815a4bf66288b450e4cfae117d8"
+REBUILD_COMMIT="59e87f0640cfbbf6feac0fad5d93573a59a5a5c3"
 curl -fsSLo rebuild_server.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${REBUILD_COMMIT}/rebuild_server.sh"
-echo "5519f9712afab2bd288d699dec11ded8db20d2af0ac7ae0adae7e25623c9fde0  rebuild_server.sh" | sha256sum -c -
+echo "306161802f93aa4b48876df88f4070876474c4f8257e22013235dd1ddcaa7198  rebuild_server.sh" | sha256sum -c -
 chmod 700 rebuild_server.sh
 ./rebuild_server.sh --domain senyz.top --email "你的证书通知邮箱" --with-warp
 ```
