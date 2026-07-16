@@ -5,7 +5,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="2.0.2"
+SCRIPT_VERSION="2.0.3"
 DOMAIN="senyz.top"
 EMAIL=""
 ENABLE_WARP=1
@@ -15,6 +15,7 @@ SITE_AVAILABLE="/etc/nginx/sites-available/senyz-proxy"
 SITE_ENABLED="/etc/nginx/sites-enabled/senyz-proxy"
 V2RAY_CONFIG="/usr/local/etc/v2ray/config.json"
 CLIENT_FILE="/root/senyz-client.txt"
+AI_CHECK_FILE="/root/senyz-ai-reachability.txt"
 V2_INSTALL_COMMIT="cb39ee88249d47ed1c601dd5d3d94758d8835629"
 WARP_COMMIT="da777a2d70f55c29951fe27f12e02670fc4e2577"
 WARP_SHA256="d9dfe54c28e0fd73ddb70f7b3895a0b36799d1e2be1b084fe221cc84438b7772"
@@ -32,6 +33,35 @@ warn() {
 die() {
     printf '[ERROR] %s\n' "$*" >&2
     exit 1
+}
+
+check_ai_target() {
+    local label="$1"
+    local url="$2"
+    local metrics
+    local http_code
+
+    if metrics="$(curl -4 --silent --show-error \
+        --connect-timeout 8 --max-time 20 \
+        --output /dev/null \
+        --write-out 'HTTP=%{http_code} TIME=%{time_total}s' \
+        "$url" 2>&1)"; then
+        http_code="${metrics#HTTP=}"
+        http_code="${http_code%% *}"
+        case "$http_code" in
+            2??|3??|401|403|429)
+                printf '[REACHED] %s: %s\n' "$label" "$metrics"
+                ;;
+            000)
+                printf '[UNREACHABLE] %s: no HTTP response\n' "$label"
+                ;;
+            *)
+                printf '[REACHED-WITH-WARNING] %s: %s\n' "$label" "$metrics"
+                ;;
+        esac
+    else
+        printf '[UNREACHABLE] %s: %s\n' "$label" "$metrics"
+    fi
 }
 
 usage() {
@@ -396,6 +426,21 @@ if (( ENABLE_WARP == 1 )); then
     WARP_MANAGED_SERVICE=v2ray /root/senyz-warp.sh install --yes
 fi
 
+log 'Checking basic network reachability for the three AI service entry pages.'
+{
+    printf 'Checked UTC: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'These checks do not log in and do not prove account eligibility.\n\n'
+    curl -4 -fsS --max-time 15 https://www.cloudflare.com/cdn-cgi/trace \
+        | grep -E '^(loc|colo|warp)=' || true
+    printf '\n'
+    check_ai_target 'ChatGPT' 'https://chatgpt.com/'
+    check_ai_target 'Claude' 'https://claude.ai/'
+    check_ai_target 'Google AI Studio' 'https://aistudio.google.com/'
+    printf '\nHTTP 2xx/3xx, 401, 403, or 429 means the network reached the service.\n'
+    printf 'It does not guarantee login, region eligibility, account safety, or uninterrupted use.\n'
+} | tee "$AI_CHECK_FILE"
+chmod 600 "$AI_CHECK_FILE"
+
 log 'Running final checks.'
 nginx -t
 systemctl is-active --quiet nginx || die 'Nginx is not active.'
@@ -409,6 +454,7 @@ printf '\n============================================================\n'
 printf 'Rebuild complete. Client details are saved in:\n  %s\n\n' "$CLIENT_FILE"
 cat "$CLIENT_FILE"
 printf '\nLog: %s\n' "$LOG_FILE"
+printf 'AI reachability: %s\n' "$AI_CHECK_FILE"
 printf 'Backup: %s\n' "$BACKUP_DIR"
 if [[ -e /var/run/reboot-required ]]; then
     printf '\nDebian requests a reboot. Reboot from the DMIT panel after saving the client link.\n'
