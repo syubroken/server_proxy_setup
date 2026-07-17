@@ -38,4 +38,3 @@ printf '%s  %s\n' "$REBUILD_SHA256" "$REBUILD_FILE" | sha256sum -c -
 chmod 700 "$REBUILD_FILE"
 
 exec "$REBUILD_FILE" --domain "$domain" --email "$email" --with-warp
-
