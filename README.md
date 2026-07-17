@@ -18,6 +18,8 @@
 
 `repair_current_server.sh` 1.1.1 已针对 2026-07-18 的 Debian 13 重装结果更新，并分别通过本地 Bash 与该服务器 Debian Bash 的只读 `bash -n` 语法检查。1.1.1 会在 Nginx reload 后重试 Webroot 探针，避免新 worker 尚未接管时出现一次性 404；检测仍不通过时会打印路由和目录权限，但不会替换证书。默认只修 Webroot、TLS 和 WebSocket 超时；只有显式加入 `--enable-security-updates` 才会开启无人值守安全更新。
 
+该脚本已于 2026-07-18 在当前 Debian 13 服务器上成功完成实机修复和只读终验。当前服务器不要重复运行；固定提交与校验值保留在 `REBUILD.md` 中，仅供审计或相同旧部署的恢复参考。
+
 当前 Debian 13 服务器继续使用已经运行正常的旧 `wgcf` WARP；不要为了换脚本在现有服务器上运行仓库内 `warp.sh install`。
 
 `warp.sh` 2.0.0 已完成静态校验，尚未在真实 Debian 服务器上执行。第一次使用应保留第二个 SSH 会话，并确认 DMIT 网页控制台可用。
