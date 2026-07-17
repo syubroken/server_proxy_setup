@@ -1,163 +1,41 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Prompt for email and domain
-read -p "Enter your email: " USER_EMAIL
-read -p "Enter your domain: " USER_DOMAIN
+# Compatibility entry point for the old one-command workflow.
+# The unsafe legacy implementation is preserved under legacy/ for reference.
 
-# Update and upgrade packages
-echo "Updating and upgrading packages..."
-apt-get update
-apt-get upgrade -y
+set -Eeuo pipefail
 
-# Install required packages
-echo "Installing required packages..."
-apt-get install -y vim ufw socat nginx
+REBUILD_COMMIT="9866347e62262caafbeb1a7d54582b6208b872b4"
+REBUILD_SHA256="5dc4122aa98822006f0a6e9c2ccf732f12dd79634e3e291b6ebe35cadb170224"
+REBUILD_URL="https://raw.githubusercontent.com/syubroken/server_proxy_setup/${REBUILD_COMMIT}/rebuild_server.sh"
+REBUILD_FILE="/root/rebuild_server.sh"
+DEFAULT_DOMAIN="senyz.top"
 
-# Create and write to .vimrc
-cat > ~/.vimrc <<EOF
-set nocompatible
-set encoding=utf-8
-set fileencodings=utf-8,Chinese
-set tabstop=4
-set shiftwidth=4
-set number
-set autoindent
-set smartindent
-set nobackup
-set hlsearch
-set display=lastline
-syntax on
-EOF
-
-# Enable and configure UFW
-echo "Configuring UFW..."
-ufw enable
-ufw allow 80/tcp
-ufw allow 443/tcp
-
-# Install acme.sh and register account
-echo "Installing acme.sh and registering account..."
-curl https://get.acme.sh | sh
-export CF_Email="$USER_EMAIL"
-echo -n "Enter your Cloudflare API Key: "
-read CF_Key
-echo
-export CF_Key
-~/.acme.sh/acme.sh --register-account -m $USER_EMAIL
-
-# Issue SSL certificate and configure nginx
-echo "Issuing SSL certificate and configuring nginx..."
-
-systemctl stop nginx
-~/.acme.sh/acme.sh --issue -d $USER_DOMAIN --standalone -k ec-256
-
-systemctl start nginx
-systemctl enable nginx
-
-# Install V2Ray
-echo "Installing V2Ray..."
-mkdir -p /etc/v2ray
-~/.acme.sh/acme.sh --installcert -d $USER_DOMAIN \
---ecc --fullchain-file /etc/v2ray/v2ray.crt \
---key-file /etc/v2ray/v2ray.key \
---reloadcmd "systemctl restart v2ray && if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi"
-bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
-bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-dat-release.sh)
-systemctl enable v2ray
-
-# Generate UUID
-uuid=$(cat /proc/sys/kernel/random/uuid)
-
-# Create V2Ray config file
-echo "Configuring V2Ray..."
-config_path="/usr/local/etc/v2ray/config.json"
-cat > "$config_path" <<EOF
-{
-	"inbounds": [
-		{
-			"port": 10001,
-			"listen": "127.0.0.1",
-			"protocol": "vmess",
-			"settings": {
-				"clients": [
-					{
-						"id": "$uuid",
-						"alterId": 0
-					}
-				]
-			},
-			"streamSettings": {
-				"network": "ws",
-				"wsSettings": {
-					"path": "/ray"
-				}
-			}
-		}
-	],
-	"outbounds": [
-		{
-			"protocol": "freedom",
-			"settings": {}
-		}
-	]
+[[ ${EUID} -eq 0 ]] || {
+    printf '[ERROR] Run this script as root.\n' >&2
+    exit 1
 }
-EOF
 
-# Append Nginx configuration to nginx.conf http block
-echo "Configuring nginx..."
-nginx_conf="/etc/nginx/nginx.conf"
-nginx_config_to_append="
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
+printf '\nThis compatibility launcher replaces the old setup_script.sh.\n'
+printf 'It does not request or store a Cloudflare API key.\n'
+printf 'It downloads a reviewed, checksum-pinned rebuild script for clean Debian 12/13.\n\n'
 
-    ssl_certificate     /etc/v2ray/v2ray.crt;
-    ssl_certificate_key /etc/v2ray/v2ray.key;
+read -r -p "Domain [${DEFAULT_DOMAIN}]: " domain
+domain="${domain:-$DEFAULT_DOMAIN}"
+read -r -p 'Certificate notification email: ' email
 
-    ssl_protocols       TLSv1 TLSv1.1 TLSv1.2;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
+[[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || {
+    printf '[ERROR] Invalid domain.\n' >&2
+    exit 1
+}
+[[ "$email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || {
+    printf '[ERROR] Invalid email address.\n' >&2
+    exit 1
+}
 
-    server_name         $USER_DOMAIN;
+curl -fsSLo "$REBUILD_FILE" "$REBUILD_URL"
+printf '%s  %s\n' "$REBUILD_SHA256" "$REBUILD_FILE" | sha256sum -c -
+chmod 700 "$REBUILD_FILE"
 
-    location /ray {
-        if (\$http_upgrade != \"websocket\") {
-            return 404;
-        }
-        proxy_redirect     off;
-        proxy_pass         http://127.0.0.1:10001;
-        proxy_http_version 1.1;
-        proxy_set_header   Upgrade \$http_upgrade;
-        proxy_set_header   Connection \"upgrade\";
-        proxy_set_header   Host \$host;
-    }
-}"
+exec "$REBUILD_FILE" --domain "$domain" --email "$email" --with-warp
 
-# 先备份原始nginx.conf
-cp "$nginx_conf" "${nginx_conf}.bak"
-
-# 使用awk将nginx.conf的内容分割并将$nginx_config_to_append插入到适当的位置
-awk -v append="$nginx_config_to_append" '
-  /http {/ {
-    print
-    print append
-    next
-  }
-  1
-' "${nginx_conf}.bak" > "$nginx_conf"
-
-# Reload Nginx
-echo "Reloading nginx..."
-nginx -s reload
-
-# Restart V2Ray
-echo "Restarting V2Ray..."
-systemctl restart v2ray
-
-# Print UUID and port
-echo "==============================================="
-echo "Setup Complete!"
-echo "Generated UUID: $uuid"
-echo "Port: 443"
-echo "==============================================="
-
-exit 0
