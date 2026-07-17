@@ -5,7 +5,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 DOMAIN="senyz.top"
 ASSUME_YES=0
 ENABLE_SECURITY_UPDATES=0
@@ -15,6 +15,8 @@ ACME_HTTP_CONF="/etc/nginx/conf.d/senyz-acme-http.conf"
 TIMEOUT_CONF="/etc/nginx/conf.d/senyz-proxy-timeouts.conf"
 LOG_FILE="/root/senyz-current-repair.log"
 BACKUP_DIR=""
+LOCAL_PROBE_ATTEMPTS=15
+LOCAL_PROBE_DELAY_SECONDS=1
 
 log() {
     printf '[INFO] %s\n' "$*"
@@ -223,16 +225,46 @@ if grep -Eq 'ssl_protocols[^;]*TLSv1([[:space:];]|\.1([[:space:];]))' <<<"$nginx
     die 'An active Nginx configuration still enables TLS 1.0 or TLS 1.1. The Nginx files were restored.'
 fi
 
-log 'Checking that the public HTTP challenge path reaches this server.'
+log 'Checking the local HTTP challenge path after the Nginx reload.'
 challenge_name="senyz-${timestamp}"
 challenge_file="${WEBROOT}/.well-known/acme-challenge/${challenge_name}"
 printf '%s' "$challenge_name" > "$challenge_file"
 chmod 644 "$challenge_file"
 
-local_challenge_result="$(curl --noproxy '*' -fsS --max-time 10 \
-    --resolve "${DOMAIN}:80:127.0.0.1" \
-    "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" || true)"
+local_challenge_result=""
+for (( attempt = 1; attempt <= LOCAL_PROBE_ATTEMPTS; attempt++ )); do
+    local_challenge_result="$(curl --noproxy '*' -fsS --max-time 10 \
+        --resolve "${DOMAIN}:80:127.0.0.1" \
+        "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" \
+        2>/dev/null || true)"
+    if [[ "$local_challenge_result" == "$challenge_name" ]]; then
+        log "The local challenge passed on attempt ${attempt}."
+        break
+    fi
+    if (( attempt < LOCAL_PROBE_ATTEMPTS )); then
+        sleep "$LOCAL_PROBE_DELAY_SECONDS"
+    fi
+done
+
 if [[ "$local_challenge_result" != "$challenge_name" ]]; then
+    warn "The local challenge still failed after ${LOCAL_PROBE_ATTEMPTS} attempts."
+    warn 'Nginx routing summary:'
+    nginx -T 2>&1 \
+        | grep -nE 'configuration file|listen[[:space:]].*80|server_name|root[[:space:]]|location[[:space:]].*acme-challenge|conflicting server name' \
+        >&2 || true
+    warn 'Webroot permissions:'
+    if command -v namei >/dev/null 2>&1; then
+        namei -l "${WEBROOT}/.well-known/acme-challenge" >&2 || true
+    else
+        ls -ld "$WEBROOT" "${WEBROOT}/.well-known" \
+            "${WEBROOT}/.well-known/acme-challenge" >&2 || true
+    fi
+    warn 'Local response headers:'
+    curl --noproxy '*' -sS -D - -o /dev/null --max-time 10 \
+        --resolve "${DOMAIN}:80:127.0.0.1" \
+        "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" \
+        >&2 || true
+    warn 'Recent Nginx errors:'
     tail -n 20 /var/log/nginx/error.log >&2 || true
     rm -f "$challenge_file"
     die 'The local Nginx challenge path failed. The certificate was not changed.'
@@ -299,3 +331,4 @@ printf '\nRepair complete.\n'
 printf 'Backup: %s\n' "$BACKUP_DIR"
 printf 'Log: %s\n' "$LOG_FILE"
 printf 'Result: /root/senyz-current-repair-result.txt\n'
+
