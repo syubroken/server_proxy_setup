@@ -5,9 +5,10 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.1.0"
 DOMAIN="senyz.top"
 ASSUME_YES=0
+ENABLE_SECURITY_UPDATES=0
 WEBROOT="/var/www/senyz-acme"
 ACME_BIN="/root/.acme.sh/acme.sh"
 ACME_HTTP_CONF="/etc/nginx/conf.d/senyz-acme-http.conf"
@@ -31,13 +32,16 @@ die() {
 usage() {
     cat <<'EOF'
 Usage:
-  ./repair_current_server.sh [--domain senyz.top] [--yes]
+  ./repair_current_server.sh [--domain senyz.top] [--enable-security-updates] [--yes]
 
 This script:
   - changes acme.sh renewal from standalone mode to Nginx webroot mode;
   - disables TLS 1.0/1.1 in the existing Nginx configuration;
   - adds long proxy timeouts for WebSocket sessions;
-  - enables automatic Debian security updates without automatic reboot.
+  - keeps automatic Debian security updates unchanged by default.
+
+Optional:
+  --enable-security-updates installs unattended-upgrades without automatic reboot.
 
 It does not change V2Ray, SSH keys, firewall rules, or WARP routing.
 EOF
@@ -54,6 +58,10 @@ while (( $# > 0 )); do
             ASSUME_YES=1
             shift
             ;;
+        --enable-security-updates)
+            ENABLE_SECURITY_UPDATES=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -66,6 +74,14 @@ done
 
 [[ ${EUID} -eq 0 ]] || die 'Run this script as root.'
 [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die 'The domain name contains unsupported characters.'
+[[ -r /etc/os-release ]] || die '/etc/os-release is missing.'
+# shellcheck disable=SC1091
+. /etc/os-release
+[[ "${ID:-}" == 'debian' ]] || die 'Only Debian is supported.'
+case "${VERSION_ID:-}" in
+    12|13) ;;
+    *) die "Debian ${VERSION_ID:-unknown} is not supported by this script." ;;
+esac
 [[ -x "$ACME_BIN" ]] || die "acme.sh was not found at ${ACME_BIN}."
 [[ -f /etc/nginx/nginx.conf ]] || die 'Nginx configuration was not found.'
 grep -Eq 'include[[:space:]]+/etc/nginx/conf\.d/\*\.conf;' /etc/nginx/nginx.conf \
@@ -88,9 +104,11 @@ openssl x509 -in "$CERT_FILE" -noout -checkhost "$DOMAIN" >/dev/null 2>&1 \
 cat <<EOF
 
 One-time repair ${SCRIPT_VERSION}
+  Debian:       ${VERSION_ID}
   Domain:       ${DOMAIN}
   Certificate:  ${CERT_FILE}
   Private key:  ${KEY_FILE}
+  Auto updates: $([[ $ENABLE_SECURITY_UPDATES -eq 1 ]] && printf 'enable' || printf 'leave unchanged')
 
 The script will create a backup under /root, reload Nginx, and issue one
 replacement certificate to prove that future renewal works without stopping Nginx.
@@ -140,20 +158,27 @@ restore_nginx() {
 
 trap 'rc=$?; warn "Repair stopped at line ${LINENO} with exit code ${rc}. Backup: ${BACKUP_DIR}. Log: ${LOG_FILE}"; exit "$rc"' ERR
 
-log 'Installing the small set of maintenance packages.'
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y cron unattended-upgrades
+if ! command -v crontab >/dev/null 2>&1; then
+    log 'Installing cron for automatic certificate renewal.'
+    apt-get update
+    apt-get install -y cron
+fi
 systemctl enable --now cron
 
-cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+if (( ENABLE_SECURITY_UPDATES == 1 )); then
+    log 'Enabling unattended Debian security updates without automatic reboot.'
+    apt-get update
+    apt-get install -y unattended-upgrades
+    cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-cat > /etc/apt/apt.conf.d/52senyz-no-auto-reboot <<'EOF'
+    cat > /etc/apt/apt.conf.d/52senyz-no-auto-reboot <<'EOF'
 Unattended-Upgrade::Automatic-Reboot "false";
 EOF
+fi
 
 install -d -m 755 "${WEBROOT}/.well-known/acme-challenge"
 
@@ -178,6 +203,7 @@ cat > "$TIMEOUT_CONF" <<'EOF'
 proxy_connect_timeout 15s;
 proxy_send_timeout 3600s;
 proxy_read_timeout 3600s;
+proxy_socket_keepalive on;
 send_timeout 3600s;
 EOF
 
@@ -190,6 +216,12 @@ if ! nginx -t; then
     die 'The proposed Nginx configuration was rejected and has been rolled back.'
 fi
 systemctl reload nginx
+
+nginx_dump_after="$(nginx -T 2>&1)"
+if grep -Eq 'ssl_protocols[^;]*TLSv1([[:space:];]|\.1([[:space:];]))' <<<"$nginx_dump_after"; then
+    restore_nginx
+    die 'An active Nginx configuration still enables TLS 1.0 or TLS 1.1. The Nginx files were restored.'
+fi
 
 log 'Checking that the public HTTP challenge path reaches this server.'
 challenge_name="senyz-${timestamp}"
@@ -215,8 +247,13 @@ else
     warn 'The local challenge passed, but the server could not read itself through the public WARP route. Continuing with the certificate authority as the authoritative external test.'
 fi
 
-log 'Issuing a replacement certificate through the webroot method.'
-"$ACME_BIN" --issue --domain "$DOMAIN" --webroot "$WEBROOT" --ecc --force
+domain_conf="/root/.acme.sh/${DOMAIN}_ecc/${DOMAIN}.conf"
+if [[ -f "$domain_conf" ]] && grep -Fq "Le_Webroot='${WEBROOT}'" "$domain_conf"; then
+    log 'acme.sh already records the expected webroot; a forced replacement certificate is not needed.'
+else
+    log 'Issuing one replacement certificate through the webroot method.'
+    "$ACME_BIN" --issue --domain "$DOMAIN" --webroot "$WEBROOT" --ecc --force
+fi
 install -d -m 755 "$(dirname "$CERT_FILE")" "$(dirname "$KEY_FILE")"
 "$ACME_BIN" --install-cert --domain "$DOMAIN" --ecc \
     --fullchain-file "$CERT_FILE" \
@@ -234,6 +271,10 @@ printf '%s\n' "$certificate_info"
 
 systemctl is-active --quiet nginx || die 'Nginx is not active after the repair.'
 systemctl is-active --quiet v2ray || die 'V2Ray is not active after the repair.'
+grep -Fq "Le_Webroot='${WEBROOT}'" "$domain_conf" \
+    || die 'acme.sh did not save the expected webroot renewal method.'
+crontab -l 2>/dev/null | grep -q 'acme.sh' \
+    || die 'The acme.sh cron entry was not found.'
 
 cat > /root/senyz-current-repair-result.txt <<EOF
 Repair version: ${SCRIPT_VERSION}
@@ -249,7 +290,7 @@ ${certificate_info}
 Future certificate renewals use:
   acme.sh + Nginx webroot ${WEBROOT}
 
-No automatic reboot is enabled.
+Automatic Debian security updates: $([[ $ENABLE_SECURITY_UPDATES -eq 1 ]] && printf 'enabled without automatic reboot' || printf 'left unchanged')
 V2Ray configuration and WARP routing were not changed.
 EOF
 chmod 600 /root/senyz-current-repair-result.txt
@@ -258,3 +299,4 @@ printf '\nRepair complete.\n'
 printf 'Backup: %s\n' "$BACKUP_DIR"
 printf 'Log: %s\n' "$LOG_FILE"
 printf 'Result: /root/senyz-current-repair-result.txt\n'
+
