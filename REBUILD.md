@@ -1,46 +1,119 @@
 # 最简登录、修复与重装指南
 
-这份文件是日常使用入口。较长的维护笔记只作为排查资料，不需要平时阅读。
+更新日期：2026-07-18  
+当前系统：DMIT Debian 13、V2Ray + WebSocket + TLS、Nginx、旧 `wgcf` WARP 全隧道
 
-## 一、现在只做两件事
+这份文件是日常使用入口。复杂背景请看本地《服务器与客户端完整指南》。
 
-### 1. 作废旧笔记里的 Cloudflare 令牌
+## 一、现在应该做什么
 
-旧的 `服务器配置脚本.md` 中仍保存着一段 Cloudflare API 令牌形式的字符串。无论它现在是否有效，都在 Cloudflare 后台将它撤销，并从笔记中删除。
+当前服务器可以正常使用，不需要再次重装。旧部署脚本把以下三个问题重新带了回来：
 
-新脚本不使用 Cloudflare API 令牌。DNS 仍在网页上手动修改，避免把长期凭据放进脚本或笔记。
+- 证书仍用 standalone 方式续期，以后可能被占用 80 端口的 Nginx 阻断。
+- Nginx 仍允许 TLS 1.0/1.1。
+- WebSocket 没有显式的一小时长连接超时。
 
-### 2. 修复当前服务器的证书续期
+使用下面的一次性修复脚本即可。它不修改 V2Ray UUID、客户端参数、SSH、UFW 或 WARP 路由。
 
-先保持 DMIT 控制台可用，并另外打开第二个 SSH 窗口。然后在服务器中执行：
+### 1. 保持两个 SSH 入口
+
+先确认 DMIT 网页控制台可用，并保留当前 SSH 窗口。另开第二个 PowerShell 窗口，确认下面命令仍可登录：
+
+```powershell
+ssh -i "C:\Users\senyz\ssh_passwd\id_rsa.pem" root@154.26.183.116
+```
+
+### 2. 下载、校验并运行修复脚本
+
+在服务器中执行：
 
 ```bash
-REPAIR_COMMIT="2265511e101091d9adcabf85cef3fb7db0fbf2cc"
+REPAIR_COMMIT="26ac2cd08be1aafeba40964e5a11c86120b36154"
 curl -fsSLo repair_current_server.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${REPAIR_COMMIT}/repair_current_server.sh"
-echo "b3e9215bae7ae34ec7924067e91e17d3459fed159a347657704b946d57509017  repair_current_server.sh" | sha256sum -c -
+echo "a52f02d1c62e89ddbd3f38fd6ec700055d82222c6d17410a2b9c969f0c89e679  repair_current_server.sh" | sha256sum -c -
 chmod 700 repair_current_server.sh
 ./repair_current_server.sh --domain senyz.top
 ```
 
-校验必须显示 `repair_current_server.sh: OK`。脚本显示计划后，输入大写 `YES`。
+校验必须显示：
 
-它只做以下事情：
+```text
+repair_current_server.sh: OK
+```
 
-- 把证书续期改为不需要停止 Nginx 的 Webroot 方式，并立即签发一次证书验证流程。
-- 停用 TLS 1.0/1.1。
-- 把 WebSocket 代理超时延长到一小时。
-- 开启 Debian 安全更新，但不自动重启。
-- 自动备份旧配置并保存日志。
+脚本显示计划后输入大写 `YES`。成功时最后显示 `Repair complete`。
 
-它不修改 V2Ray 配置、SSH 密钥、防火墙规则或当前 WARP 路由。成功时最后会显示 `Repair complete`。失败时保留当前 SSH 窗口，不要反复执行，把 `/root/senyz-current-repair.log` 的内容用于排查。
+默认不会开启无人值守系统更新。如以后明确决定启用，再单独加入 `--enable-security-updates`；这次不要加，避免把证书修复和系统更新混在一起。
 
-如果曾运行 `1.0.2` 并在 HTTP challenge 的 `404` 处停止，可以直接下载上面的新版重新执行。已经完成的软件安装和 Nginx 安全设置是可重复的，新版会继续完成证书步骤。
+### 3. 把完整输出发回当前任务
 
-实机记录：`1.0.3` 已于 **2026-07-16** 在当前 DMIT Debian 12 服务器完整执行成功。HTTP 公网验证、ZeroSSL 签发、证书部署、Nginx 重载和 cron 安装均通过；当前证书有效期到 **2026-10-14 23:59:59 UTC**，acme.sh 根据 CA 的 ARI 信息选定下一次续期时间为 **2026-09-30 11:53:18 UTC**。
+失败时不要反复运行，也不要重装。保留 SSH 窗口，并查看：
 
-## 二、平时登录服务器
+```bash
+cat /root/senyz-current-repair.log
+```
 
-在 Windows PowerShell 中执行：
+脚本会在 `/root/senyz-current-repair-时间/` 自动备份旧配置。
+
+## 二、修复后怎样确认
+
+执行：
+
+```bash
+nginx -t
+systemctl is-active nginx v2ray wg-quick@wgcf
+/root/.acme.sh/acme.sh --info -d senyz.top --ecc
+crontab -l | grep acme.sh
+```
+
+预期结果：
+
+- `nginx -t` 成功。
+- 三个服务均为 `active`。
+- acme.sh 显示 Webroot 为 `/var/www/senyz-acme`，不再是 standalone。
+- root 的 crontab 中有 acme.sh 定时检查。
+
+证书不会每天重新签发。acme.sh 会定时检查，只有临近续期窗口才申请新证书，然后自动 reload Nginx。
+
+## 三、Windows v2rayN 是否需要修改
+
+**这次修复不需要修改 v2rayN。** 继续使用当前能正常访问外网的节点即可：
+
+| 参数 | 值 |
+|---|---|
+| 地址 | `senyz.top` |
+| 端口 | `443` |
+| UUID | 当前服务器生成并已填入 v2rayN 的值 |
+| 传输 | WebSocket |
+| 路径 | `/ray` |
+| Host | `senyz.top` |
+| TLS | 开启 |
+| SNI | `senyz.top` |
+| 跳过证书验证 | 关闭 |
+
+平时保持 v2rayN 的系统代理模式开启、TUN 关闭。只有确认某个原生 App 不遵守系统代理时，才单独评估 TUN；不要同时运行多个接管系统网络的软件。
+
+本次聊天附件中还出现过当前 V2Ray UUID 和 WARP 私钥。Cloudflare Global API 已轮换，但它与这两项不是同一凭据。为减少中断风险，这次脚本不会自动轮换 UUID；以后单独轮换 UUID 时，只需在所有客户端更新 UUID，其他节点参数不变。
+
+完整客户端步骤见 [`CLIENTS.md`](CLIENTS.md)。
+
+## 四、“正在重新连接”与服务器重装
+
+以前在 Windows 本地做的 Codex/ChatGPT App 传输设置保存在本机。只重装远程 Debian 不会删除这项本地设置，因此它可能继续有效。
+
+但此前在 Debian 12 上做过的 Nginx 长连接修复属于服务器配置，已经被这次旧脚本重装覆盖。上面的修复脚本会重新补上。
+
+本次任务没有出现重连是积极信号，但一次成功不能证明以后绝不会发生。再次出现时：
+
+1. 等待 30 至 60 秒，看任务是否自动恢复。
+2. 查看 <https://status.openai.com/>。
+3. 完全退出并重新打开 App，创建一个真正的新任务。
+4. 确认 v2rayN 当前节点和系统代理仍已开启。
+5. 只有多个网站也同时失败时，才检查服务器；不要因为一次重连直接重装。
+
+## 五、平时登录服务器
+
+Windows PowerShell：
 
 ```powershell
 ssh -i "C:\Users\senyz\ssh_passwd\id_rsa.pem" root@154.26.183.116
@@ -48,67 +121,41 @@ ssh -i "C:\Users\senyz\ssh_passwd\id_rsa.pem" root@154.26.183.116
 
 正常登录不需要先输入 `codex`，也不需要服务器密码。
 
-只有在**确认刚刚重装了这台服务器**之后，遇到主机指纹变化才先执行：
+只有在确认刚刚重装服务器后，遇到主机指纹变化才执行：
 
 ```powershell
 ssh-keygen -R 154.26.183.116
 ```
 
-然后重新执行 SSH 登录命令。不要清空整个 `known_hosts`。
+然后重新登录。不要清空整个 `known_hosts`。
 
-## 三、DMIT 重装时的密钥顺序
+## 六、以后重装的简化入口
 
-你的理解是正确的：先在 DMIT 选择 SSH 公钥，系统把公钥放进新服务器，然后才用本地对应的私钥登录。
-
-最简单的做法：
-
-1. 在 DMIT 的 `Services` -> `SSH Keys` 中保留与你的 `id_rsa.pem` 对应的公钥。
-2. 重装时选择这个密钥和 Debian 13；如果当时没有 Debian 13，可以继续选 Debian 12。
-3. 重装完成后，先在 PowerShell 删除该 IP 的旧主机指纹，再使用上面的 SSH 命令登录。
-4. DMIT 默认禁止 root 密码远程登录；继续使用密钥即可，不要为了方便重新开放密码登录。
-
-如果以后更换公钥，DMIT 的 `Access` -> `Change Key` 可以选择新密钥；必须从 DMIT 面板重启实例后才会应用。
-
-## 四、重装后的完整自动部署
-
-重装前确认 Cloudflare 中 `senyz.top` 的 A 记录指向服务器 IP，并保持“仅 DNS”，不要开启橙色云代理。DMIT 重装通常不改变 IP；IP 没变就不需要修改 DNS。
-
-登录全新的 Debian 后执行：
+旧 `setup_script.sh` 已被安全兼容入口替代，原版只保存在 `legacy/` 中且已禁用。以后重装为干净 Debian 12/13 后，可以运行：
 
 ```bash
-REBUILD_COMMIT="9866347e62262caafbeb1a7d54582b6208b872b4"
-curl -fsSLo rebuild_server.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${REBUILD_COMMIT}/rebuild_server.sh"
-echo "5dc4122aa98822006f0a6e9c2ccf732f12dd79634e3e291b6ebe35cadb170224  rebuild_server.sh" | sha256sum -c -
-chmod 700 rebuild_server.sh
-./rebuild_server.sh --domain senyz.top --email "你的证书通知邮箱" --with-warp
+SETUP_COMMIT="4746450281322a9447e4dab73d7aa1313d378f19"
+curl -fsSLo setup_script.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${SETUP_COMMIT}/setup_script.sh"
+echo "ea068cd5837fea5eac87bd18898be01b5c21c49acba258abeac5a8ae983a841d  setup_script.sh" | sha256sum -c -
+chmod 700 setup_script.sh
+./setup_script.sh
 ```
 
-把最后一行中的中文替换成真实邮箱。脚本显示计划后输入大写 `YES`，随后自动完成：
+它会询问域名和证书通知邮箱，不再询问 Cloudflare API。随后下载并校验固定版本的 `rebuild_server.sh`，自动配置 Webroot、TLS 1.2/1.3、WebSocket 超时、V2Ray 和 WARP。
 
-- 先放行当前 SSH 端口，再启用 UFW。
-- 关闭 SSH 密码登录，保留 root 密钥登录。
-- 安装 Nginx、Certbot、V2Ray 和安全更新。
-- 检查 DNS 与 80 端口，签发证书并实际测试自动续期。
-- 配置 VMess + WebSocket + TLS 和一小时长连接。
-- 生成新的 UUID 和 `vmess://` 一键导入链接。
-- 安装仓库中经过复核的官方 WARP 全隧道管理脚本。
-- 在最终 WARP 出口下只读检查 ChatGPT、Claude 和 Google AI Studio 入口页的基本 HTTPS 可达性，不登录账号。
+重要边界：完整重建脚本和仓库内官方 WARP 管理脚本仍未在真实 DMIT 干净实例上完整验收。当前稳定服务器不要为了测试它们而迁移 WARP；未来第一次使用时保留两个 SSH 窗口和 DMIT 控制台。
 
-完成后客户端资料保存在：
+## 七、最少维护事项
+
+每月或出现异常时执行一次：
 
 ```bash
-cat /root/senyz-client.txt
+systemctl --failed
+systemctl is-active nginx v2ray wg-quick@wgcf ssh
+nginx -t
+df -h
+/root/.acme.sh/acme.sh --info -d senyz.top --ecc
+crontab -l | grep acme.sh
 ```
 
-复制其中的 `vmess://` 链接，可导入 v2rayN 或 Shadowrocket。日志保存在 `/root/senyz-rebuild.log`。
-
-三项 AI 服务的网络检查结果保存在 `/root/senyz-ai-reachability.txt`。`2xx`、`3xx`、`401`、`403` 或 `429` 只表示已经到达服务端，不等于账号、地区或登录一定可用。
-
-新脚本只允许在干净系统上运行。如果中途失败并且你不想排查，直接再次重装 Debian，然后从本节开头重新执行；不要在旧系统上强制覆盖。
-
-## 五、当前已知边界
-
-- 旧 `setup_script.sh` 保持不变，仅作为历史备份，不再作为推荐安装入口。
-- 当前稳定服务器暂不迁移旧 `wgcf` WARP；只运行第一节的一次性修复。
-- 当前修复脚本 `1.0.3` 已通过真实 DMIT Debian 12 验收。完整重建脚本 `2.0.3` 和新版 WARP 安装流程仍只完成静态检查；第一次重装使用时必须保留第二个 SSH 窗口和 DMIT 控制台。
-- WARP、VPS 或代理协议都不能保证 AI 账号地区合规或绝对安全；本方案解决的是服务器安全、续期和网络可靠性。
+不要把以下内容放进 GitHub、普通 Markdown、截图或聊天：Cloudflare 密钥、SSH 私钥、VMess UUID/分享链接、WireGuard PrivateKey、账号 Cookie 或登录令牌。
