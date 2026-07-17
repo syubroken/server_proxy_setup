@@ -29,8 +29,11 @@ ssh -i "C:\Users\senyz\ssh_passwd\id_rsa.pem" root@154.26.183.116
 
 ```bash
 REPAIR_COMMIT="26ac2cd08be1aafeba40964e5a11c86120b36154"
-curl -fsSLo repair_current_server.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${REPAIR_COMMIT}/repair_current_server.sh"
-echo "a52f02d1c62e89ddbd3f38fd6ec700055d82222c6d17410a2b9c969f0c89e679  repair_current_server.sh" | sha256sum -c -
+RAW="https://raw.githubusercontent.com/syubroken/server_proxy_setup"
+curl -fsSLo repair_current_server.sh \
+  "${RAW}/${REPAIR_COMMIT}/repair_current_server.sh"
+echo "a52f02d1c62e89ddbd3f38fd6ec700055d82222c6d17410a2b9c969f0c89e679  repair_current_server.sh" \
+  | sha256sum -c -
 chmod 700 repair_current_server.sh
 ./repair_current_server.sh --domain senyz.top
 ```
@@ -135,8 +138,11 @@ ssh-keygen -R 154.26.183.116
 
 ```bash
 SETUP_COMMIT="4746450281322a9447e4dab73d7aa1313d378f19"
-curl -fsSLo setup_script.sh "https://raw.githubusercontent.com/syubroken/server_proxy_setup/${SETUP_COMMIT}/setup_script.sh"
-echo "ea068cd5837fea5eac87bd18898be01b5c21c49acba258abeac5a8ae983a841d  setup_script.sh" | sha256sum -c -
+RAW="https://raw.githubusercontent.com/syubroken/server_proxy_setup"
+curl -fsSLo setup_script.sh \
+  "${RAW}/${SETUP_COMMIT}/setup_script.sh"
+echo "ea068cd5837fea5eac87bd18898be01b5c21c49acba258abeac5a8ae983a841d  setup_script.sh" \
+  | sha256sum -c -
 chmod 700 setup_script.sh
 ./setup_script.sh
 ```
