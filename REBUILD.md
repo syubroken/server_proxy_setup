@@ -5,29 +5,29 @@
 
 这份文件是日常使用入口。复杂背景请看本地《服务器与客户端完整指南》。
 
-## 一、现在应该做什么
+## 一、当前状态
 
-当前服务器可以正常使用，不需要再次重装。旧部署脚本把以下三个问题重新带了回来：
+当前服务器可以正常使用，不需要再次重装，也不要重复运行修复脚本。`repair_current_server.sh` 1.1.1 已于 2026-07-18 成功完成，旧部署带回的三个问题均已处理：
 
-- 证书仍用 standalone 方式续期，以后可能被占用 80 端口的 Nginx 阻断。
-- Nginx 仍允许 TLS 1.0/1.1。
-- WebSocket 没有显式的一小时长连接超时。
+- acme.sh 已从 standalone 改为 Nginx Webroot `/var/www/senyz-acme`。
+- Nginx 只启用 TLS 1.2/1.3。
+- WebSocket 代理超时已设为 3600 秒并启用上游 TCP keepalive。
+- Nginx、V2Ray、旧 `wgcf` WARP、cron 和 SSH 均为 `active`。
+- 新证书有效期至 `2026-10-15 23:59:59 UTC`，计划于 `2026-10-02 20:08:19 UTC` 起自动续期。
 
-使用下面的一次性修复脚本即可。它不修改 V2Ray UUID、客户端参数、SSH、UFW 或 WARP 路由。
+2026-07-17 首次运行 1.1.0 时，本机 Webroot 探针在 Nginx reload 后立即得到一次 404，脚本在签发证书前安全停止。1.1.1 增加有限重试后，内外 Webroot 验证、签发、安装、Nginx reload 和续期配置全部成功。修复未修改 V2Ray UUID、客户端参数、SSH、UFW 或 WARP 路由。
 
-2026-07-17 首次运行 1.1.0 时，本机 Webroot 探针在 Nginx reload 后立即得到一次 404，脚本因此在签发证书前安全停止。只读复查确认新 ACME 站点已加载、请求路由正确、目录权限正常；TLS 1.2/1.3 和 WebSocket 超时配置也已生效。1.1.1 增加了有上限的 reload 等待重试和失败诊断，请只按下面的固定版本再运行一次。
+### 1. 日常 SSH 入口
 
-### 1. 保持两个 SSH 入口
-
-先确认 DMIT 网页控制台可用，并保留当前 SSH 窗口。另开第二个 PowerShell 窗口，确认下面命令仍可登录：
+平时使用下面的 PowerShell 命令登录；进行任何网络维护前，再额外保留第二个 SSH 窗口并确认 DMIT 网页控制台可用：
 
 ```powershell
 ssh -i "C:\Users\senyz\ssh_passwd\id_rsa.pem" root@154.26.183.116
 ```
 
-### 2. 下载、校验并运行修复脚本
+### 2. 已使用的修复版本（留档）
 
-在服务器中执行：
+以下是本次成功使用的固定版本和校验值，仅供留档。当前服务器不要再次执行：
 
 ```bash
 REPAIR_COMMIT="bed7fc2feae85311a169b222a061fa463c10c705"
@@ -40,21 +40,21 @@ chmod 700 repair_current_server.sh
 ./repair_current_server.sh --domain senyz.top
 ```
 
-校验必须显示：
+当时校验显示：
 
 ```text
 repair_current_server.sh: OK
 ```
 
-脚本显示计划后输入大写 `YES`。成功时最后显示 `Repair complete`。
+脚本最终显示 `Repair complete`，并生成备份 `/root/senyz-current-repair-20260717T200758Z`。
 
-出现 `The local challenge passed on attempt 1`（或稍后的 attempt）都是正常结果。1.1.1 最多等待约 15 秒；如果仍失败，它会在退出前给出更有用的 Nginx 路由、Webroot 权限和响应头。
+本次显示 `The local challenge passed on attempt 1`，内外 HTTP challenge 均通过。
 
-默认不会开启无人值守系统更新。如以后明确决定启用，再单独加入 `--enable-security-updates`；这次不要加，避免把证书修复和系统更新混在一起。
+本次保持 `Auto updates: leave unchanged`，没有借修复脚本改变无人值守系统更新策略。
 
-### 3. 把完整输出发回当前任务
+### 3. 以后异常时查看日志
 
-失败时不要反复运行，也不要重装。保留 SSH 窗口，并查看：
+以后若证书续期异常，不要直接重跑修复脚本或重装。保留 SSH 窗口，并先查看：
 
 ```bash
 cat /root/senyz-current-repair.log
@@ -62,7 +62,7 @@ cat /root/senyz-current-repair.log
 
 脚本会在 `/root/senyz-current-repair-时间/` 自动备份旧配置。
 
-## 二、修复后怎样确认
+## 二、自动续期怎样确认
 
 执行：
 
@@ -73,14 +73,14 @@ systemctl is-active nginx v2ray wg-quick@wgcf
 crontab -l | grep acme.sh
 ```
 
-预期结果：
+当前已验证结果：
 
 - `nginx -t` 成功。
 - 三个服务均为 `active`。
 - acme.sh 显示 Webroot 为 `/var/www/senyz-acme`，不再是 standalone。
 - root 的 crontab 中有 acme.sh 定时检查。
 
-证书不会每天重新签发。acme.sh 会定时检查，只有临近续期窗口才申请新证书，然后自动 reload Nginx。
+证书不会每天重新签发。cron 每天运行四次检查；acme.sh 记录的下一次续期时间为 `2026-10-02 20:08:19 UTC`，证书到期时间为 `2026-10-15 23:59:59 UTC`。续期成功后会自动运行 `nginx -t && systemctl reload nginx`。
 
 ## 三、Windows v2rayN 是否需要修改
 
@@ -102,7 +102,7 @@ crontab -l | grep acme.sh
 
 本次任务中还出现过当前 V2Ray UUID 和 WARP 私钥。任务本身不是公开网页，这不等于凭据已被他人使用；但它们已经离开了原本只应存在的位置，稳妥做法仍是轮换。Cloudflare Global API 的轮换不会自动轮换这两项。
 
-- 先完成并验收证书修复，不在同一次操作里换凭据。
+- 证书修复已经完成并通过验收；不要在同一次操作里同时换两项凭据。
 - 再单独轮换 VMess UUID，并在 Windows、macOS 和 iPhone 的节点中只更新 UUID。
 - 最后在独立维护窗口轮换旧 `wgcf` WARP 身份，或在下一次干净重建时生成新身份。不要只手工替换 `/etc/wireguard/wgcf.conf` 的 `PrivateKey`，否则 Cloudflare 端记录不匹配，会直接断开 WARP。新身份验证正常后还要注销旧注册。只生成新配置并不能证明旧私钥已经失效。
 
@@ -112,7 +112,7 @@ crontab -l | grep acme.sh
 
 以前在 Windows 本地做的 Codex/ChatGPT App 传输设置保存在本机。只重装远程 Debian 不会删除这项本地设置，因此它可能继续有效。
 
-但此前在 Debian 12 上做过的 Nginx 长连接修复属于服务器配置，已经被这次旧脚本重装覆盖。上面的修复脚本会重新补上。
+此前在 Debian 12 上做过的 Nginx 长连接修复曾被旧脚本重装覆盖，现已由 1.1.1 在 Debian 13 上重新补齐。
 
 本次任务没有出现重连是积极信号，但一次成功不能证明以后绝不会发生。再次出现时：
 
