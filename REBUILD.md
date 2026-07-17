@@ -104,7 +104,7 @@ crontab -l | grep acme.sh
 
 - 先完成并验收证书修复，不在同一次操作里换凭据。
 - 再单独轮换 VMess UUID，并在 Windows、macOS 和 iPhone 的节点中只更新 UUID。
-- 最后在独立维护窗口轮换旧 `wgcf` WARP 身份，或在下一次干净重建时生成新身份。不要只手工替换 `/etc/wireguard/wgcf.conf` 的 `PrivateKey`，否则 Cloudflare 端记录不匹配，会直接断开 WARP。新身份验证正常后还要注销旧注册；只生成新配置并不能证明旧私钥已经失效。
+- 最后在独立维护窗口轮换旧 `wgcf` WARP 身份，或在下一次干净重建时生成新身份。不要只手工替换 `/etc/wireguard/wgcf.conf` 的 `PrivateKey`，否则 Cloudflare 端记录不匹配，会直接断开 WARP。新身份验证正常后还要注销旧注册。只生成新配置并不能证明旧私钥已经失效。
 
 完整客户端步骤见 [`CLIENTS.md`](CLIENTS.md)。
 
