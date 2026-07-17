@@ -16,7 +16,7 @@
 
 日常操作先阅读 [REBUILD.md](REBUILD.md)。首次使用 WARP 前再阅读 [WARP.md](WARP.md)。不要再执行旧的 `git.io/warp.sh` 短链接命令。
 
-`repair_current_server.sh` 1.1.0 已针对 2026-07-18 的 Debian 13 重装结果更新，并在该服务器上通过只读 `bash -n` 语法检查。默认只修 Webroot、TLS 和 WebSocket 超时；只有显式加入 `--enable-security-updates` 才会开启无人值守安全更新。
+`repair_current_server.sh` 1.1.1 已针对 2026-07-18 的 Debian 13 重装结果更新，并分别通过本地 Bash 与该服务器 Debian Bash 的只读 `bash -n` 语法检查。1.1.1 会在 Nginx reload 后重试 Webroot 探针，避免新 worker 尚未接管时出现一次性 404；检测仍不通过时会打印路由和目录权限，但不会替换证书。默认只修 Webroot、TLS 和 WebSocket 超时；只有显式加入 `--enable-security-updates` 才会开启无人值守安全更新。
 
 当前 Debian 13 服务器继续使用已经运行正常的旧 `wgcf` WARP；不要为了换脚本在现有服务器上运行仓库内 `warp.sh install`。
 
