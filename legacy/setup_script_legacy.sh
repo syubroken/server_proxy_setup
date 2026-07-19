@@ -1,12 +1,5 @@
 #!/bin/bash
 
-# Historical snapshot of the original setup script.
-# DO NOT RUN: it contains known firewall, certificate-renewal, TLS, ordering,
-# dependency-pinning, and error-handling defects. It is kept only as a record.
-
-printf '[ERROR] This historical script is intentionally disabled. Use ../setup_script.sh or ../rebuild_server.sh.\n' >&2
-exit 1
-
 # Prompt for email and domain
 read -p "Enter your email: " USER_EMAIL
 read -p "Enter your domain: " USER_DOMAIN
@@ -139,10 +132,10 @@ server {
     }
 }"
 
-# Back up the original nginx.conf
+# 先备份原始nginx.conf
 cp "$nginx_conf" "${nginx_conf}.bak"
 
-# Insert the server block into the http block
+# 使用awk将nginx.conf的内容分割并将$nginx_config_to_append插入到适当的位置
 awk -v append="$nginx_config_to_append" '
   /http {/ {
     print
@@ -152,12 +145,15 @@ awk -v append="$nginx_config_to_append" '
   1
 ' "${nginx_conf}.bak" > "$nginx_conf"
 
+# Reload Nginx
 echo "Reloading nginx..."
 nginx -s reload
 
+# Restart V2Ray
 echo "Restarting V2Ray..."
 systemctl restart v2ray
 
+# Print UUID and port
 echo "==============================================="
 echo "Setup Complete!"
 echo "Generated UUID: $uuid"
