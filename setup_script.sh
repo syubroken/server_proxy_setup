@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Compatibility entry point for the old one-command workflow.
-# The unsafe legacy implementation is preserved under legacy/ for reference.
+# The historical implementation remains executable under legacy/; read its README first.
 
 set -Eeuo pipefail
 
