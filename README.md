@@ -5,7 +5,7 @@
 ## 文件
 
 - `setup_script.sh`：兼容原来操作习惯的安全入口；下载并校验固定版本的 `rebuild_server.sh`。
-- `legacy/setup_script_legacy.sh`：已禁用的旧脚本历史副本，只供查看，不能执行。
+- `legacy/setup_script_legacy.sh`：恢复原有执行行为的旧脚本；可以执行但不推荐，风险与边界见 `legacy/README.md`。
 - `repair_current_server.sh`：当前 Debian 12/13 服务器的一次性修复，不改变 V2Ray/WARP 路由或 UUID。
 - `rebuild_server.sh`：用于干净 Debian 12/13 的简化自动重建脚本。
 - `REBUILD.md`：日常登录、当前修复和以后重装的一页式中文指南。
