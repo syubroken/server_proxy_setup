@@ -142,7 +142,7 @@ ssh-keygen -R 154.26.183.116
 
 ## 六、以后重装的简化入口
 
-旧 `setup_script.sh` 已被安全兼容入口替代，原版只保存在 `legacy/` 中且已禁用。以后重装为干净 Debian 12/13 后，可以运行：
+旧 `setup_script.sh` 已被安全兼容入口替代。原版保存在 `legacy/` 中并恢复了原有执行行为，但由于已知缺陷不推荐使用，详情见 `legacy/README.md`。以后重装为干净 Debian 12/13 后，建议运行：
 
 ```bash
 SETUP_COMMIT="4746450281322a9447e4dab73d7aa1313d378f19"
