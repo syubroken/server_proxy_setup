@@ -8,11 +8,13 @@ IFS=$'\n\t'
 umask 077
 export LC_ALL=C
 
-SCRIPT_VERSION="3.0.0-rc1"
+SCRIPT_VERSION="3.0.0-rc2"
 CONFIG_DIR="/etc/senyz-warp"
 ROUTE_ENV="${CONFIG_DIR}/route.env"
 SETTINGS_ENV="${CONFIG_DIR}/settings.env"
 STATE_DIR="/var/lib/senyz-warp"
+INSTALL_STAGED_MARKER="${STATE_DIR}/install-staged"
+INSTALL_COMPLETE_MARKER="${STATE_DIR}/install-complete"
 STOP_MARKER="${STATE_DIR}/managed-service-stopped"
 DESIRED_MARKER="${STATE_DIR}/managed-service-should-run"
 FAILURE_COUNT_FILE="${STATE_DIR}/transient-failures"
@@ -156,6 +158,19 @@ write_settings() {
         printf 'WARP_TRANSIENT_LIMIT=%q\n' "${WARP_TRANSIENT_LIMIT}"
     } > "${SETTINGS_ENV}"
     chmod 0600 "${SETTINGS_ENV}"
+}
+
+mark_install_staged() {
+    install -d -m 0700 "${STATE_DIR}"
+    touch "${INSTALL_STAGED_MARKER}"
+    chmod 0600 "${INSTALL_STAGED_MARKER}"
+}
+
+mark_install_complete() {
+    install -d -m 0700 "${STATE_DIR}"
+    touch "${INSTALL_COMPLETE_MARKER}"
+    chmod 0600 "${INSTALL_COMPLETE_MARKER}"
+    rm -f "${INSTALL_STAGED_MARKER}"
 }
 
 install_dependencies() {
@@ -340,21 +355,38 @@ warp_cli_connected() {
 }
 
 ensure_registration() {
-    local registration
+    local registration registration_output registration_rc
     if registration="$(warp_cli registration show 2>&1)" \
         && ! grep -Eiq '(not registered|no registration|registration missing)' <<<"${registration}"; then
         log 'Using the existing WARP consumer registration.'
-    else
-        log 'Creating a new WARP consumer registration.'
-        warp_cli registration new
+        return 0
     fi
+
+    log 'Creating a new WARP consumer registration (one attempt only).'
+    if registration_output="$(warp_cli registration new 2>&1)"; then
+        log 'The WARP consumer registration was created.'
+        return 0
+    else
+        registration_rc=$?
+    fi
+
+    if grep -Eiq '(^|[^0-9])429([^0-9]|$)|too many requests|rate.?limit' \
+        <<<"${registration_output}"; then
+        warn 'Cloudflare temporarily rate-limited new WARP registrations (HTTP 429).'
+        warn 'No WARP route switch was attempted; the managed proxy service was left unchanged.'
+        warn 'Do not retry repeatedly. Wait and run the same guided installer again later.'
+        return 75
+    fi
+
+    [[ -z "${registration_output}" ]] || printf '%s\n' "${registration_output}" >&2
+    warn 'Cloudflare WARP registration failed before any route switch.'
+    return "${registration_rc}"
 }
 
 configure_warp() {
     "${ROUTE_GUARD}"
     systemctl start "${ROUTE_UNIT}"
     systemctl enable --now "${WARP_SERVICE}"
-    ensure_registration
     warp_cli mode warp+doh
     warp_cli tunnel protocol set "${WARP_PROTOCOL}"
 }
@@ -650,6 +682,13 @@ do_status() {
     else
         printf 'managed-service intent: unchanged\n'
     fi
+    if [[ -f "${INSTALL_COMPLETE_MARKER}" ]]; then
+        printf 'installation state: complete\n'
+    elif [[ -f "${INSTALL_STAGED_MARKER}" ]]; then
+        printf 'installation state: staged; rerun install to continue\n'
+    else
+        printf 'installation state: not recorded\n'
+    fi
 }
 
 prepare_existing_install() {
@@ -667,11 +706,13 @@ connect_warp() {
     confirm "This stops ${WARP_MANAGED_SERVICE} until WARP IPv4 and IPv6 are verified."
     protect_managed_service
     write_settings
+    ensure_registration
     configure_warp
     warp_cli connect
     enable_watchdog
     if wait_for_warp; then
         recover_managed_service
+        mark_install_complete
         log 'WARP is connected and dual-stack egress is verified.'
         do_status
     else
@@ -687,6 +728,7 @@ repair_warp() {
     install_dependencies
     install_route_guard
     install_cloudflare_client
+    ensure_registration
     install_health_probe
     install_managed_service_guard
     install_watchdog
@@ -697,6 +739,7 @@ repair_warp() {
     enable_watchdog
     if wait_for_warp; then
         recover_managed_service
+        mark_install_complete
         log 'WARP repair passed.'
         do_status
     else
@@ -721,11 +764,13 @@ update_warp() {
     protect_managed_service
     install_dependencies
     install_cloudflare_client
+    ensure_registration
     configure_warp
     warp_cli connect
     enable_watchdog
     if wait_for_warp; then
         recover_managed_service
+        mark_install_complete
         log 'WARP update passed.'
         do_status
     else
@@ -785,6 +830,8 @@ show_logs() {
 }
 
 do_install() {
+    local registration_rc
+
     require_root install
     require_supported_system
     load_settings
@@ -792,28 +839,46 @@ do_install() {
     service_exists || die "Service ${WARP_MANAGED_SERVICE}.service does not exist."
     legacy_wgcf_present \
         && die 'A legacy wgcf/WireGuard deployment is present. Use this only after a clean reinstall.'
-    [[ ! -e "${SETTINGS_ENV}" ]] \
-        || die 'A managed WARP installation already exists; use status or repair.'
-    if dpkg-query -W cloudflare-warp >/dev/null 2>&1; then
+    [[ ! -f "${INSTALL_COMPLETE_MARKER}" ]] \
+        || die 'The managed WARP installation is already complete; use status or repair.'
+    if [[ -r "${SETTINGS_ENV}" && ! -r "${ROUTE_ENV}" ]]; then
+        die 'WARP settings exist without route metadata; stop and review this incomplete state.'
+    fi
+    if dpkg-query -W cloudflare-warp >/dev/null 2>&1 \
+        && [[ ! -f "${INSTALL_STAGED_MARKER}" ]] \
+        && [[ ! -r "${SETTINGS_ENV}" ]] \
+        && [[ ! -r "${ROUTE_ENV}" ]]; then
         die 'An unmanaged Cloudflare WARP package is already installed.'
     fi
-    confirm "This stops ${WARP_MANAGED_SERVICE}, installs official Cloudflare WARP, and restores the service only after dual-stack verification. Keep a second SSH session and the DMIT console open."
+    confirm "This prepares official Cloudflare WARP while ${WARP_MANAGED_SERVICE} keeps its current state. The service is stopped only immediately before WARP connects, then restored after dual-stack verification. Keep a second SSH session and the DMIT console open."
 
-    protect_managed_service
     install_dependencies
-    capture_management_route
-    write_settings
-    install_route_guard
+    mark_install_staged
     install_cloudflare_client
+    if ensure_registration; then
+        :
+    else
+        registration_rc=$?
+        return "${registration_rc}"
+    fi
+    if [[ ! -r "${ROUTE_ENV}" ]]; then
+        capture_management_route
+    fi
+    if [[ ! -r "${SETTINGS_ENV}" ]]; then
+        write_settings
+    fi
+    install_route_guard
     install_health_probe
     install_managed_service_guard
     install_watchdog
     configure_warp
+    protect_managed_service
     warp_cli connect
     enable_watchdog
 
     if wait_for_warp; then
         recover_managed_service
+        mark_install_complete
         log 'WARP installation passed; dual-stack egress is active.'
         do_status
     else
@@ -826,7 +891,7 @@ show_help() {
 senyz warp.sh ${SCRIPT_VERSION}
 
 Usage:
-  ./warp.sh install [--yes]     Install official WARP after a clean base rebuild
+  ./warp.sh install [--yes]     Install or safely resume official WARP setup
   ./warp.sh status              Read-only service and dual-stack egress status
   ./warp.sh repair [--yes]      Repair WARP with fail-closed service protection
   ./warp.sh connect [--yes]     Connect and restore the managed service after checks
@@ -843,6 +908,8 @@ Optional environment variables:
   CLOUDFLARE_WARP_VERSION=...   Exact package version available in the official repo
 
 No Cloudflare API token, account key, or DNS credential is used.
+If Cloudflare temporarily returns HTTP 429 during registration, do not loop.
+Wait and run the same install command again; the pre-route stage is resumable.
 EOF
 }
 
