@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-SCRIPT_VERSION="3.0.0-rc1"
+SCRIPT_VERSION="3.0.0-rc2"
 DOMAIN="senyz.top"
 EMAIL=""
 ASSUME_YES=0
@@ -119,7 +119,7 @@ case "${VERSION_ID:-}" in
     *) die "Debian ${VERSION_ID:-unknown} is not supported." ;;
 esac
 [[ -d /run/systemd/system ]] || die 'systemd is required.'
-for command_name in apt-get awk base64 curl getent grep install mapfile sed ssh-keygen systemctl; do
+for command_name in apt-get awk base64 curl grep install mapfile sed sort ssh-keygen systemctl; do
     command -v "${command_name}" >/dev/null 2>&1 || die "Required command is missing: ${command_name}"
 done
 [[ -s /root/.ssh/authorized_keys ]] \
@@ -137,15 +137,23 @@ if [[ -x /usr/local/bin/v2ray || -f "${V2RAY_CONFIG}" || -e "${STATE_DIR}" \
     die 'An existing proxy or WARP deployment was detected. Reinstall Debian before using this clean-build script.'
 fi
 
+if ! command -v dig >/dev/null 2>&1; then
+    log 'Installing the standard DNS lookup tool used by the preflight check.'
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends dnsutils
+fi
+
 log 'Checking the DNS-only A record before changing the server.'
 public_ip="$(curl -4 -fsS --connect-timeout 8 --max-time 20 \
     https://www.cloudflare.com/cdn-cgi/trace \
     | awk -F= '$1 == "ip" {print $2; exit}')"
 [[ -n "${public_ip}" ]] || die 'Could not determine the server public IPv4 address.'
-mapfile -t domain_ips < <(getent ahostsv4 "${DOMAIN}" | awk '{print $1}' | sort -u)
+mapfile -t domain_ips < <(dig +time=5 +tries=2 +short A "${DOMAIN}" \
+    | awk '/^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ {print}' | sort -u)
 (( ${#domain_ips[@]} > 0 )) || die "DNS does not resolve ${DOMAIN}."
-mapfile -t domain_ipv6 < <(getent ahostsv6 "${DOMAIN}" 2>/dev/null \
-    | awk '$1 ~ /:/ {print $1}' | sort -u)
+mapfile -t domain_ipv6 < <(dig +time=5 +tries=2 +short AAAA "${DOMAIN}" \
+    | awk '/^[0-9A-Fa-f:]+$/ && /:/ {print tolower($0)}' | sort -u)
 if (( ${#domain_ipv6[@]} > 0 )); then
     printf 'DNS IPv6:    %s\n' "${domain_ipv6[*]}"
     die 'Remove the AAAA record before using this IPv4-only certificate playbook.'
@@ -172,8 +180,8 @@ Clean base rebuild ${SCRIPT_VERSION}
   WARP:         not installed in this phase
   SSH:          root public-key login only
 
-Keep this SSH window open. WARP will be installed later from a second SSH
-window after the base proxy and the DMIT Serial Console have been verified.
+Keep this SSH window open. The guided launcher continues after a second SSH
+window and the DMIT Serial Console have been verified.
 EOF
 
 if (( ASSUME_YES == 0 )); then
@@ -547,9 +555,9 @@ if [[ -x "${VERIFY_TARGET}" ]]; then
     printf 'Verify: %s\n' "${VERIFY_TARGET}"
 fi
 if [[ -x "${WARP_FILE}" ]]; then
-    printf '\nAfter testing ordinary websites, setting a console-only root password,\n'
-    printf 'opening a second SSH session, and confirming DMIT Serial Console access:\n'
-    printf '  WARP_MANAGED_SERVICE=v2ray %s install\n' "${WARP_FILE}"
+    printf '\nReturn to the guided launcher for the safety checkpoint and WARP phase.\n'
+    printf 'If that launcher was closed, use the single continuation command it installed:\n'
+    printf '  /root/senyz-finish-rebuild\n'
 else
     printf '\nWARP manager is missing; do not use an unpinned replacement.\n'
 fi
