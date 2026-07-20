@@ -1,175 +1,91 @@
-# 最简登录、修复与重装指南
+# 日常使用与重装入口
 
-更新日期：2026-07-18  
-当前系统：DMIT Debian 13、V2Ray + WebSocket + TLS、Nginx、旧 `wgcf` WARP 全隧道
+更新日期：2026-07-21
 
-这份文件是日常使用入口。复杂背景请看本地《服务器与客户端完整指南》。
+## 一、当前服务器
 
-## 一、当前状态
+当前能稳定使用的服务器不需要因为 rc3 草稿而改动，也不要在现有旧部署上运行 `rebuild_server.sh` 或 `warp.sh install`。这两个脚本只用于下一次全新安装的 Debian 12/13。
 
-当前服务器可以正常使用，不需要再次重装，也不要重复运行修复脚本。`repair_current_server.sh` 1.1.1 已于 2026-07-18 成功完成，旧部署带回的三个问题均已处理：
+曾经成功运行过的 `repair_current_server.sh` 是一次性修复，不要在没有新故障证据时重复执行。当前服务器是否继续使用、何时重装，仍由实际稳定性和你的安排决定。
 
-- acme.sh 已从 standalone 改为 Nginx Webroot `/var/www/senyz-acme`。
-- Nginx 只启用 TLS 1.2/1.3。
-- WebSocket 代理超时已设为 3600 秒并启用上游 TCP keepalive。
-- Nginx、V2Ray、旧 `wgcf` WARP、cron 和 SSH 均为 `active`。
-- 新证书有效期至 `2026-10-15 23:59:59 UTC`，计划于 `2026-10-02 20:08:19 UTC` 起自动续期。
+## 二、平时怎样 SSH 登录
 
-2026-07-17 首次运行 1.1.0 时，本机 Webroot 探针在 Nginx reload 后立即得到一次 404，脚本在签发证书前安全停止。1.1.1 增加有限重试后，内外 Webroot 验证、签发、安装、Nginx reload 和续期配置全部成功。修复未修改 V2Ray UUID、客户端参数、SSH、UFW 或 WARP 路由。
-
-### 1. 日常 SSH 入口
-
-平时使用下面的 PowerShell 命令登录；进行任何网络维护前，再额外保留第二个 SSH 窗口并确认 DMIT 网页控制台可用：
+Windows 使用原来的私钥时：
 
 ```powershell
-ssh -i "C:\Users\senyz\ssh_passwd\id_rsa.pem" root@154.26.183.116
+ssh -i "C:\Users\senyz\ssh_passwd\id_rsa.pem" root@<服务器IPv4>
 ```
 
-### 2. 已使用的修复版本（留档）
-
-以下是本次成功使用的固定版本和校验值，仅供留档。当前服务器不要再次执行：
-
-```bash
-REPAIR_COMMIT="bed7fc2feae85311a169b222a061fa463c10c705"
-RAW="https://raw.githubusercontent.com/syubroken/server_proxy_setup"
-curl -fsSLo repair_current_server.sh \
-  "${RAW}/${REPAIR_COMMIT}/repair_current_server.sh"
-echo "dd3c6ec23703fd71c87fad54615c7e99625118b2a0d20bec6a41ab0f1c89842e  repair_current_server.sh" \
-  | sha256sum -c -
-chmod 700 repair_current_server.sh
-./repair_current_server.sh --domain senyz.top
-```
-
-当时校验显示：
-
-```text
-repair_current_server.sh: OK
-```
-
-脚本最终显示 `Repair complete`，并生成备份 `/root/senyz-current-repair-20260717T200758Z`。
-
-本次显示 `The local challenge passed on attempt 1`，内外 HTTP challenge 均通过。
-
-本次保持 `Auto updates: leave unchanged`，没有借修复脚本改变无人值守系统更新策略。
-
-### 3. 以后异常时查看日志
-
-以后若证书续期异常，不要直接重跑修复脚本或重装。保留 SSH 窗口，并先查看：
-
-```bash
-cat /root/senyz-current-repair.log
-```
-
-脚本会在 `/root/senyz-current-repair-时间/` 自动备份旧配置。
-
-## 二、自动续期怎样确认
-
-执行：
-
-```bash
-nginx -t
-systemctl is-active nginx v2ray wg-quick@wgcf
-/root/.acme.sh/acme.sh --info -d senyz.top --ecc
-crontab -l | grep acme.sh
-```
-
-当前已验证结果：
-
-- `nginx -t` 成功。
-- 三个服务均为 `active`。
-- acme.sh 显示 Webroot 为 `/var/www/senyz-acme`，不再是 standalone。
-- root 的 crontab 中有 acme.sh 定时检查。
-
-证书不会每天重新签发。cron 每天运行四次检查；acme.sh 记录的下一次续期时间为 `2026-10-02 20:08:19 UTC`，证书到期时间为 `2026-10-15 23:59:59 UTC`。续期成功后会自动运行 `nginx -t && systemctl reload nginx`。
-
-## 三、Windows v2rayN 是否需要修改
-
-**这次修复不需要修改 v2rayN。** 继续使用当前能正常访问外网的节点即可：
-
-| 参数 | 值 |
-|---|---|
-| 地址 | `senyz.top` |
-| 端口 | `443` |
-| UUID | 当前服务器生成并已填入 v2rayN 的值 |
-| 传输 | WebSocket |
-| 路径 | `/ray` |
-| Host | `senyz.top` |
-| TLS | 开启 |
-| SNI | `senyz.top` |
-| 跳过证书验证 | 关闭 |
-
-平时保持 v2rayN 的系统代理模式开启、TUN 关闭。只有确认某个原生 App 不遵守系统代理时，才单独评估 TUN；不要同时运行多个接管系统网络的软件。
-
-本次任务中还出现过当前 V2Ray UUID 和 WARP 私钥。任务本身不是公开网页，这不等于凭据已被他人使用；但它们已经离开了原本只应存在的位置，稳妥做法仍是轮换。Cloudflare Global API 的轮换不会自动轮换这两项。
-
-- 证书修复已经完成并通过验收；不要在同一次操作里同时换两项凭据。
-- 再单独轮换 VMess UUID，并在 Windows、macOS 和 iPhone 的节点中只更新 UUID。
-- 最后在独立维护窗口轮换旧 `wgcf` WARP 身份，或在下一次干净重建时生成新身份。不要只手工替换 `/etc/wireguard/wgcf.conf` 的 `PrivateKey`，否则 Cloudflare 端记录不匹配，会直接断开 WARP。新身份验证正常后还要注销旧注册。只生成新配置并不能证明旧私钥已经失效。
-
-完整客户端步骤见 [`CLIENTS.md`](CLIENTS.md)。
-
-## 四、“正在重新连接”与服务器重装
-
-以前在 Windows 本地做的 Codex/ChatGPT App 传输设置保存在本机。只重装远程 Debian 不会删除这项本地设置，因此它可能继续有效。
-
-此前在 Debian 12 上做过的 Nginx 长连接修复曾被旧脚本重装覆盖，现已由 1.1.1 在 Debian 13 上重新补齐。
-
-本次任务没有出现重连是积极信号，但一次成功不能证明以后绝不会发生。再次出现时：
-
-1. 等待 30 至 60 秒，看任务是否自动恢复。
-2. 查看 <https://status.openai.com/>。
-3. 完全退出并重新打开 App，创建一个真正的新任务。
-4. 确认 v2rayN 当前节点和系统代理仍已开启。
-5. 只有多个网站也同时失败时，才检查服务器；不要因为一次重连直接重装。
-
-## 五、平时登录服务器
-
-Windows PowerShell：
+以后改用自己生成的通用密钥时：
 
 ```powershell
-ssh -i "C:\Users\senyz\ssh_passwd\id_rsa.pem" root@154.26.183.116
+ssh -i "$HOME\.ssh\vps_senyz_ed25519" root@<服务器IPv4>
 ```
 
-正常登录不需要先输入 `codex`，也不需要服务器密码。
-
-只有在确认刚刚重装服务器后，遇到主机指纹变化才执行：
-
-```powershell
-ssh-keygen -R 154.26.183.116
-```
-
-然后重新登录。不要清空整个 `known_hosts`。
-
-## 六、以后重装的简化入口
-
-旧 `setup_script.sh` 已被安全兼容入口替代。原版保存在 `legacy/` 中并恢复了原有执行行为，但由于已知缺陷不推荐使用，详情见 `legacy/README.md`。以后重装为干净 Debian 12/13 后，建议运行：
+macOS：
 
 ```bash
-SETUP_COMMIT="4746450281322a9447e4dab73d7aa1313d378f19"
-RAW="https://raw.githubusercontent.com/syubroken/server_proxy_setup"
-curl -fsSLo setup_script.sh \
-  "${RAW}/${SETUP_COMMIT}/setup_script.sh"
-echo "ea068cd5837fea5eac87bd18898be01b5c21c49acba258abeac5a8ae983a841d  setup_script.sh" \
-  | sha256sum -c -
-chmod 700 setup_script.sh
-./setup_script.sh
+ssh -i ~/.ssh/vps_senyz_ed25519 root@<服务器IPv4>
 ```
 
-它会询问域名和证书通知邮箱，不再询问 Cloudflare API。随后下载并校验固定版本的 `rebuild_server.sh`，自动配置 Webroot、TLS 1.2/1.3、WebSocket 超时、V2Ray 和 WARP。
-
-重要边界：完整重建脚本和仓库内官方 WARP 管理脚本仍未在真实 DMIT 干净实例上完整验收。当前稳定服务器不要为了测试它们而迁移 WARP；未来第一次使用时保留两个 SSH 窗口和 DMIT 控制台。
-
-## 七、最少维护事项
-
-每月或出现异常时执行一次：
+正常 SSH 登录不需要先输入 `codex`，也不需要服务器密码。同一个 IPv4 重装后出现主机指纹变化时，只删除该 IPv4 的旧记录：
 
 ```bash
-systemctl --failed
-systemctl is-active nginx v2ray wg-quick@wgcf ssh
-nginx -t
-df -h
-/root/.acme.sh/acme.sh --info -d senyz.top --ecc
-crontab -l | grep acme.sh
+ssh-keygen -R <服务器IPv4>
 ```
 
-不要把以下内容放进 GitHub、普通 Markdown、截图或聊天：Cloudflare 密钥、SSH 私钥、VMess UUID/分享链接、WireGuard PrivateKey、账号 Cookie 或登录令牌。
+不要清空整个 `known_hosts`。
+
+## 三、当前服务器平时要做什么
+
+网络正常时无需每天登录或主动重装。证书、WARP 或服务出现明确异常时，先保存只读检查输出，再决定修复或重装；不要因为一次 App 重连就直接改服务器。
+
+当前旧部署可使用仓库中的 `服务器健康检查_只读.sh` 检查，不要把包含 UUID、客户端链接、私钥或账户令牌的内容发送到聊天或 GitHub。
+
+## 四、下一次全新重装
+
+完整操作只看 [`下一次纯净重装操作清单.md`](下一次纯净重装操作清单.md)。它已经包括：
+
+- 通用 VPS 条件和自有 SSH 密钥；
+- DNS、供应商防火墙和首次登录；
+- 一条安装入口；
+- WARP 未完成时停止 V2Ray；
+- 路由切换自动回退；
+- macOS/iPhone Shadowrocket 导入；
+- 一条继续命令和一条只读验收命令。
+
+不需要学习 GitHub 提交、分支或 SHA256，也不要求准备两个 SSH 窗口或提前学会供应商 Console 排错。
+
+## 五、新流程失败时
+
+只要末尾没有显示 `Result: PASS`，就不要导入或使用该节点。等待后重新 SSH 登录并执行：
+
+```bash
+senyz-finish-rebuild
+```
+
+WARP 切换时 SSH 断开，先等待至少 5 分钟让本机自动回退，再重新连接。仍不通时在供应商面板普通重启一次；控制台只作为最后的可选救援入口，屏幕内容可以交给 Codex 分析。
+
+只有继续入口、自动回退和供应商重启都不能恢复时，才评估再次重装或使用 `legacy/setup_script_legacy.sh`。
+
+## 六、新流程完成后的检查
+
+rc3 成功安装后，每月或感觉异常时执行：
+
+```bash
+senyz-verify-rebuild --require-warp
+```
+
+最后显示 `Result: PASS` 即可。证书由 Certbot Webroot 与 systemd timer 自动续期；Debian 安全更新自动安装，但不会自动重启。
+
+需要再次显示客户端信息时：
+
+```bash
+senyz-show-client
+```
+
+该命令只应在最终验收成功后使用。客户端信息属于凭据，不放入 GitHub、普通笔记或公开截图。
+
+## 七、边界
+
+新流程能做到的是：WARP 未验证时不让这套 V2Ray 节点悄悄使用 VPS 原始出口。它不能保证 WARP 出口 IP 固定、所谓“IP 纯净度”或任何第三方账号状态，也不能消除供应商、入站 IP、域名和本地网络故障。
