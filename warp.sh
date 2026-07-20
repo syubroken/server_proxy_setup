@@ -8,7 +8,7 @@ IFS=$'\n\t'
 umask 077
 export LC_ALL=C
 
-SCRIPT_VERSION="3.0.0-rc2"
+SCRIPT_VERSION="3.0.0-rc3"
 CONFIG_DIR="/etc/senyz-warp"
 ROUTE_ENV="${CONFIG_DIR}/route.env"
 SETTINGS_ENV="${CONFIG_DIR}/settings.env"
@@ -21,11 +21,17 @@ FAILURE_COUNT_FILE="${STATE_DIR}/transient-failures"
 ROUTE_GUARD="/usr/local/sbin/senyz-warp-route-guard"
 HEALTH_PROBE="/usr/local/sbin/senyz-warp-health"
 WATCHDOG="/usr/local/sbin/senyz-warp-watchdog"
+SAFETY_ROLLBACK="/usr/local/sbin/senyz-warp-safety-rollback"
 ROUTE_UNIT="senyz-warp-route-guard.service"
 WATCHDOG_UNIT="senyz-warp-watchdog.service"
 WATCHDOG_TIMER="senyz-warp-watchdog.timer"
+SAFETY_ROLLBACK_UNIT="senyz-warp-safety-rollback.service"
+SAFETY_ROLLBACK_TIMER="senyz-warp-safety-rollback.timer"
 WARP_SERVICE="warp-svc.service"
+AWAITING_WARP_MARKER="/etc/senyz-proxy/awaiting-warp"
 CLOUDFLARE_REPO_KEY_FINGERPRINT="C068A2B5771775193CBE1F2F6E2DD2174FA1C3BA"
+REGISTRATION_MAX_ATTEMPTS=3
+REGISTRATION_RETRY_DELAYS=(30 90)
 
 REQUESTED_SERVICE="${WARP_MANAGED_SERVICE:-${MANAGED_SERVICE:-}}"
 REQUESTED_PROTOCOL="${WARP_PROTOCOL:-}"
@@ -164,6 +170,10 @@ mark_install_staged() {
     install -d -m 0700 "${STATE_DIR}"
     touch "${INSTALL_STAGED_MARKER}"
     chmod 0600 "${INSTALL_STAGED_MARKER}"
+    rm -f "${INSTALL_COMPLETE_MARKER}"
+    install -d -m 0700 "$(dirname "${AWAITING_WARP_MARKER}")"
+    touch "${AWAITING_WARP_MARKER}"
+    chmod 0600 "${AWAITING_WARP_MARKER}"
 }
 
 mark_install_complete() {
@@ -171,6 +181,22 @@ mark_install_complete() {
     touch "${INSTALL_COMPLETE_MARKER}"
     chmod 0600 "${INSTALL_COMPLETE_MARKER}"
     rm -f "${INSTALL_STAGED_MARKER}"
+    rm -f "${AWAITING_WARP_MARKER}"
+}
+
+install_staging_service_guard() {
+    local dropin_dir
+    dropin_dir="/etc/systemd/system/${WARP_MANAGED_SERVICE}.service.d"
+    install -d -m 0755 "${dropin_dir}"
+    cat > "${dropin_dir}/90-senyz-warp.conf" <<EOF
+[Unit]
+Description=Do not start ${WARP_MANAGED_SERVICE} before verified WARP is available
+
+[Service]
+ExecStartPre=/usr/bin/test -f ${INSTALL_COMPLETE_MARKER}
+EOF
+    chmod 0644 "${dropin_dir}/90-senyz-warp.conf"
+    systemctl daemon-reload
 }
 
 install_dependencies() {
@@ -355,32 +381,47 @@ warp_cli_connected() {
 }
 
 ensure_registration() {
-    local registration registration_output registration_rc
+    local attempt delay_index registration registration_output registration_rc
     if registration="$(warp_cli registration show 2>&1)" \
         && ! grep -Eiq '(not registered|no registration|registration missing)' <<<"${registration}"; then
         log 'Using the existing WARP consumer registration.'
         return 0
     fi
 
-    log 'Creating a new WARP consumer registration (one attempt only).'
-    if registration_output="$(warp_cli registration new 2>&1)"; then
-        log 'The WARP consumer registration was created.'
-        return 0
-    else
-        registration_rc=$?
-    fi
+    for (( attempt=1; attempt<=REGISTRATION_MAX_ATTEMPTS; attempt++ )); do
+        log "Creating a WARP consumer registration (attempt ${attempt}/${REGISTRATION_MAX_ATTEMPTS})."
+        if registration_output="$(warp_cli registration new 2>&1)"; then
+            log 'The WARP consumer registration was created.'
+            return 0
+        else
+            registration_rc=$?
+        fi
 
-    if grep -Eiq '(^|[^0-9])429([^0-9]|$)|too many requests|rate.?limit' \
-        <<<"${registration_output}"; then
-        warn 'Cloudflare temporarily rate-limited new WARP registrations (HTTP 429).'
-        warn 'No WARP route switch was attempted; the managed proxy service was left unchanged.'
-        warn 'Do not retry repeatedly. Wait and run the same guided installer again later.'
-        return 75
-    fi
+        if (( attempt < REGISTRATION_MAX_ATTEMPTS )); then
+            delay_index=$((attempt - 1))
+            if grep -Eiq '(^|[^0-9])429([^0-9]|$)|too many requests|rate.?limit' \
+                <<<"${registration_output}"; then
+                warn "Cloudflare temporarily limited registration; waiting ${REGISTRATION_RETRY_DELAYS[delay_index]} seconds before a controlled retry."
+            else
+                warn "Registration did not complete; waiting ${REGISTRATION_RETRY_DELAYS[delay_index]} seconds before a controlled retry."
+            fi
+            sleep "${REGISTRATION_RETRY_DELAYS[delay_index]}"
+            continue
+        fi
 
-    [[ -z "${registration_output}" ]] || printf '%s\n' "${registration_output}" >&2
-    warn 'Cloudflare WARP registration failed before any route switch.'
-    return "${registration_rc}"
+        if grep -Eiq '(^|[^0-9])429([^0-9]|$)|too many requests|rate.?limit' \
+            <<<"${registration_output}"; then
+            warn 'Cloudflare registration is still temporarily limited after controlled retries.'
+            warn 'No WARP route switch was attempted, and the managed proxy remains stopped.'
+            return 75
+        fi
+
+        [[ -z "${registration_output}" ]] || printf '%s\n' "${registration_output}" >&2
+        warn 'Cloudflare WARP registration failed before any route switch.'
+        return "${registration_rc}"
+    done
+
+    return 75
 }
 
 configure_warp() {
@@ -464,14 +505,24 @@ wait_for_warp() {
 }
 
 protect_managed_service() {
+    local should_run=0
     install -d -m 0700 "${STATE_DIR}"
-    if service_exists && systemctl is-active --quiet "${WARP_MANAGED_SERVICE}.service"; then
-        systemctl stop "${WARP_MANAGED_SERVICE}.service"
-        touch "${STOP_MARKER}"
-        touch "${DESIRED_MARKER}"
-        chmod 0600 "${STOP_MARKER}" "${DESIRED_MARKER}"
-        warn "Stopped ${WARP_MANAGED_SERVICE} to prevent direct egress while WARP is unverified."
+    service_exists || return 0
+    if systemctl is-active --quiet "${WARP_MANAGED_SERVICE}.service" \
+        || systemctl is-enabled --quiet "${WARP_MANAGED_SERVICE}.service" \
+        || [[ -f "${DESIRED_MARKER}" ]]; then
+        should_run=1
     fi
+    if systemctl is-active --quiet "${WARP_MANAGED_SERVICE}.service"; then
+        systemctl stop "${WARP_MANAGED_SERVICE}.service"
+    fi
+    touch "${STOP_MARKER}"
+    chmod 0600 "${STOP_MARKER}"
+    if (( should_run == 1 )); then
+        touch "${DESIRED_MARKER}"
+        chmod 0600 "${DESIRED_MARKER}"
+    fi
+    warn "${WARP_MANAGED_SERVICE} is held stopped until WARP passes verification."
 }
 
 recover_managed_service() {
@@ -486,27 +537,7 @@ recover_managed_service() {
 install_watchdog() {
     cat > "${WATCHDOG}" <<'WATCHDOG_EOF'
 #!/usr/bin/env bash
-set -uo pipefail
-
-SETTINGS_ENV="/etc/senyz-warp/settings.env"
-STATE_DIR="/var/lib/senyz-warp"
-STOP_MARKER="${STATE_DIR}/managed-service-stopped"
-DESIRED_MARKER="${STATE_DIR}/managed-service-should-run"
-FAILURE_COUNT_FILE="${STATE_DIR}/transient-failures"
-ROUTE_GUARD="/usr/local/sbin/senyz-warp-route-guard"
-HEALTH_PROBE="/usr/local/sbin/senyz-warp-health"
-WARP_SERVICE="warp-svc.service"
-
-[[ -r "${SETTINGS_ENV}" ]] || exit 0
-# shellcheck disable=SC1090
-. "${SETTINGS_ENV}"
-install -d -m 0700 "${STATE_DIR}"
-install -d -m 0755 /run/lock
-exec 9>/run/lock/senyz-warp-watchdog.lock
-flock -n 9 || exit 0
-
-warp_cli() {
-    if warp-cli --help 2>&1 | grep -q -- '--accept-tos'; then
+set -uo pipefai…181 tokens truncated…then
         LC_ALL=C warp-cli --accept-tos "$@"
     else
         LC_ALL=C warp-cli "$@"
@@ -629,6 +660,83 @@ EOF
     systemctl enable "${WATCHDOG_TIMER}"
 }
 
+install_safety_rollback() {
+    cat > "${SAFETY_ROLLBACK}" <<'SAFETY_ROLLBACK_EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+
+SETTINGS_ENV="/etc/senyz-warp/settings.env"
+STATE_DIR="/var/lib/senyz-warp"
+COMPLETE_MARKER="${STATE_DIR}/install-complete"
+STOP_MARKER="${STATE_DIR}/managed-service-stopped"
+DESIRED_MARKER="${STATE_DIR}/managed-service-should-run"
+WATCHDOG_TIMER="senyz-warp-watchdog.timer"
+WARP_SERVICE="warp-svc.service"
+WARP_MANAGED_SERVICE="v2ray"
+
+[[ ! -f "${COMPLETE_MARKER}" ]] || exit 0
+if [[ -r "${SETTINGS_ENV}" ]]; then
+    # shellcheck disable=SC1090
+    . "${SETTINGS_ENV}"
+fi
+
+install -d -m 0700 "${STATE_DIR}"
+systemctl stop "${WARP_MANAGED_SERVICE}.service" >/dev/null 2>&1 || true
+touch "${STOP_MARKER}" "${DESIRED_MARKER}"
+chmod 0600 "${STOP_MARKER}" "${DESIRED_MARKER}"
+systemctl disable --now "${WATCHDOG_TIMER}" >/dev/null 2>&1 || true
+
+if command -v warp-cli >/dev/null 2>&1; then
+    if warp-cli --help 2>&1 | grep -q -- '--accept-tos'; then
+        timeout 20s warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+    else
+        timeout 20s warp-cli disconnect >/dev/null 2>&1 || true
+    fi
+fi
+systemctl disable --now "${WARP_SERVICE}" >/dev/null 2>&1 || true
+logger -t senyz-warp \
+    "Unverified WARP route transition rolled back; ${WARP_MANAGED_SERVICE} remains stopped."
+SAFETY_ROLLBACK_EOF
+    chmod 0755 "${SAFETY_ROLLBACK}"
+
+    cat > "/etc/systemd/system/${SAFETY_ROLLBACK_UNIT}" <<EOF
+[Unit]
+Description=Roll back an unverified Cloudflare WARP route transition
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=${SAFETY_ROLLBACK}
+EOF
+
+    cat > "/etc/systemd/system/${SAFETY_ROLLBACK_TIMER}" <<EOF
+[Unit]
+Description=Timed safety rollback for a Cloudflare WARP route transition
+
+[Timer]
+OnActiveSec=4min
+AccuracySec=1s
+Unit=${SAFETY_ROLLBACK_UNIT}
+EOF
+    systemctl daemon-reload
+}
+
+arm_safety_rollback() {
+    systemctl stop "${SAFETY_ROLLBACK_TIMER}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${SAFETY_ROLLBACK_UNIT}" >/dev/null 2>&1 || true
+    systemctl start "${SAFETY_ROLLBACK_TIMER}"
+    log 'A four-minute local safety rollback is armed for the route transition.'
+}
+
+cancel_safety_rollback() {
+    systemctl stop "${SAFETY_ROLLBACK_TIMER}" >/dev/null 2>&1 || true
+}
+
+trigger_safety_rollback() {
+    systemctl stop "${SAFETY_ROLLBACK_TIMER}" >/dev/null 2>&1 || true
+    systemctl start "${SAFETY_ROLLBACK_UNIT}" >/dev/null 2>&1 || true
+}
+
 enable_watchdog() {
     systemctl enable --now "${WATCHDOG_TIMER}"
 }
@@ -670,6 +778,8 @@ do_status() {
     printf '\n=== protection ===\n'
     printf 'route guard: %s\n' "$(systemctl is-active "${ROUTE_UNIT}" 2>/dev/null || true)"
     printf 'watchdog:    %s\n' "$(systemctl is-active "${WATCHDOG_TIMER}" 2>/dev/null || true)"
+    printf 'route rollback timer: %s\n' \
+        "$(systemctl is-active "${SAFETY_ROLLBACK_TIMER}" 2>/dev/null || true)"
     printf '%-12s %s\n' "${WARP_MANAGED_SERVICE}:" \
         "$(systemctl is-active "${WARP_MANAGED_SERVICE}.service" 2>/dev/null || true)"
     if [[ -f "${STOP_MARKER}" ]]; then
@@ -685,7 +795,7 @@ do_status() {
     if [[ -f "${INSTALL_COMPLETE_MARKER}" ]]; then
         printf 'installation state: complete\n'
     elif [[ -f "${INSTALL_STAGED_MARKER}" ]]; then
-        printf 'installation state: staged; rerun install to continue\n'
+        printf 'installation state: protected and incomplete; use the guided continuation\n'
     else
         printf 'installation state: not recorded\n'
     fi
@@ -704,18 +814,26 @@ connect_warp() {
     require_root connect
     prepare_existing_install
     confirm "This stops ${WARP_MANAGED_SERVICE} until WARP IPv4 and IPv6 are verified."
+    mark_install_staged
     protect_managed_service
     write_settings
     ensure_registration
+    install_safety_rollback
+    arm_safety_rollback
     configure_warp
-    warp_cli connect
+    if ! warp_cli connect; then
+        trigger_safety_rollback
+        die 'WARP connect failed; the route was rolled back and the managed service remains stopped.'
+    fi
     enable_watchdog
     if wait_for_warp; then
+        cancel_safety_rollback
         recover_managed_service
         mark_install_complete
         log 'WARP is connected and dual-stack egress is verified.'
         do_status
     else
+        trigger_safety_rollback
         die "WARP did not pass verification; ${WARP_MANAGED_SERVICE} remains protected."
     fi
 }
@@ -724,6 +842,7 @@ repair_warp() {
     require_root repair
     prepare_existing_install
     confirm "This stops ${WARP_MANAGED_SERVICE}, repairs WARP, and restores it only after verification."
+    mark_install_staged
     protect_managed_service
     install_dependencies
     install_route_guard
@@ -732,17 +851,24 @@ repair_warp() {
     install_health_probe
     install_managed_service_guard
     install_watchdog
+    install_safety_rollback
+    arm_safety_rollback
     configure_warp
     systemctl restart "${WARP_SERVICE}"
     sleep 3
-    warp_cli connect
+    if ! warp_cli connect; then
+        trigger_safety_rollback
+        die 'WARP repair could not connect; the route was rolled back.'
+    fi
     enable_watchdog
     if wait_for_warp; then
+        cancel_safety_rollback
         recover_managed_service
         mark_install_complete
         log 'WARP repair passed.'
         do_status
     else
+        trigger_safety_rollback
         die "WARP repair did not pass verification; ${WARP_MANAGED_SERVICE} remains protected."
     fi
 }
@@ -752,6 +878,7 @@ disconnect_warp() {
     prepare_existing_install
     confirm "This disconnects WARP and stops ${WARP_MANAGED_SERVICE} to prevent direct egress."
     systemctl disable --now "${WATCHDOG_TIMER}" 2>/dev/null || true
+    mark_install_staged
     protect_managed_service
     warp_cli disconnect || true
     log "WARP is disconnected; ${WARP_MANAGED_SERVICE} remains stopped."
@@ -761,19 +888,27 @@ update_warp() {
     require_root update
     prepare_existing_install
     confirm "This stops ${WARP_MANAGED_SERVICE}, updates Cloudflare WARP, and verifies egress."
+    mark_install_staged
     protect_managed_service
     install_dependencies
     install_cloudflare_client
     ensure_registration
+    install_safety_rollback
+    arm_safety_rollback
     configure_warp
-    warp_cli connect
+    if ! warp_cli connect; then
+        trigger_safety_rollback
+        die 'WARP update could not connect; the route was rolled back.'
+    fi
     enable_watchdog
     if wait_for_warp; then
+        cancel_safety_rollback
         recover_managed_service
         mark_install_complete
         log 'WARP update passed.'
         do_status
     else
+        trigger_safety_rollback
         die "WARP update did not pass verification; ${WARP_MANAGED_SERVICE} remains protected."
     fi
 }
@@ -801,6 +936,7 @@ uninstall_warp() {
     protect_managed_service
     systemctl disable --now "${WARP_MANAGED_SERVICE}.service" 2>/dev/null || true
     systemctl disable --now "${WATCHDOG_TIMER}" 2>/dev/null || true
+    systemctl stop "${SAFETY_ROLLBACK_TIMER}" 2>/dev/null || true
     warp_cli disconnect >/dev/null 2>&1 || true
     warp_cli registration delete >/dev/null 2>&1 || true
     systemctl disable --now "${ROUTE_UNIT}" 2>/dev/null || true
@@ -811,7 +947,9 @@ uninstall_warp() {
         "/etc/systemd/system/${WATCHDOG_TIMER}" \
         "/etc/systemd/system/${WATCHDOG_UNIT}" \
         "/etc/systemd/system/${ROUTE_UNIT}" \
-        "${WATCHDOG}" "${HEALTH_PROBE}" "${ROUTE_GUARD}"
+        "/etc/systemd/system/${SAFETY_ROLLBACK_TIMER}" \
+        "/etc/systemd/system/${SAFETY_ROLLBACK_UNIT}" \
+        "${WATCHDOG}" "${HEALTH_PROBE}" "${ROUTE_GUARD}" "${SAFETY_ROLLBACK}"
     rmdir "${dropin_dir}" 2>/dev/null || true
     rm -rf "${CONFIG_DIR}" "${STATE_DIR}"
     systemctl daemon-reload
@@ -850,10 +988,12 @@ do_install() {
         && [[ ! -r "${ROUTE_ENV}" ]]; then
         die 'An unmanaged Cloudflare WARP package is already installed.'
     fi
-    confirm "This prepares official Cloudflare WARP while ${WARP_MANAGED_SERVICE} keeps its current state. The service is stopped only immediately before WARP connects, then restored after dual-stack verification. Keep a second SSH session and the DMIT console open."
+    confirm "This installs official Cloudflare WARP. ${WARP_MANAGED_SERVICE} remains stopped until dual-stack WARP passes verification; a timed local rollback protects the route transition."
 
-    install_dependencies
     mark_install_staged
+    protect_managed_service
+    install_staging_service_guard
+    install_dependencies
     install_cloudflare_client
     if ensure_registration; then
         :
@@ -871,17 +1011,23 @@ do_install() {
     install_health_probe
     install_managed_service_guard
     install_watchdog
+    install_safety_rollback
+    arm_safety_rollback
     configure_warp
-    protect_managed_service
-    warp_cli connect
+    if ! warp_cli connect; then
+        trigger_safety_rollback
+        die 'WARP could not connect; the route was rolled back and the managed service remains stopped.'
+    fi
     enable_watchdog
 
     if wait_for_warp; then
+        cancel_safety_rollback
         recover_managed_service
         mark_install_complete
         log 'WARP installation passed; dual-stack egress is active.'
         do_status
     else
+        trigger_safety_rollback
         die "WARP did not pass dual-stack verification; ${WARP_MANAGED_SERVICE} remains protected."
     fi
 }
@@ -908,8 +1054,9 @@ Optional environment variables:
   CLOUDFLARE_WARP_VERSION=...   Exact package version available in the official repo
 
 No Cloudflare API token, account key, or DNS credential is used.
-If Cloudflare temporarily returns HTTP 429 during registration, do not loop.
-Wait and run the same install command again; the pre-route stage is resumable.
+Registration uses three controlled attempts with increasing delays. If Cloudflare
+is still temporarily limiting registration, the proxy stays stopped and the
+guided continuation command can safely resume later.
 EOF
 }
 
