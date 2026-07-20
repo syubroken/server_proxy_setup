@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 
-# Build the base proxy on a freshly reinstalled Debian 12/13 server.
-# WARP is deliberately staged and must be installed separately afterwards.
+# Build the base proxy on a freshly reinstalled Debian 12/13 VPS.
+# V2Ray is tested locally, then held stopped until verified WARP is available.
 
 set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-SCRIPT_VERSION="3.0.0-rc2"
+SCRIPT_VERSION="3.0.0-rc3"
 DOMAIN="senyz.top"
 EMAIL=""
 ASSUME_YES=0
@@ -28,6 +28,9 @@ WARP_FILE="/root/senyz-warp.sh"
 VERIFY_SOURCE="/root/senyz-verify-rebuild.sh"
 VERIFY_TARGET="/usr/local/sbin/senyz-verify-rebuild"
 SSH_DROPIN="/etc/ssh/sshd_config.d/00-senyz-key-only.conf"
+AWAITING_WARP_MARKER="${STATE_DIR}/awaiting-warp"
+WARP_COMPLETE_MARKER="/var/lib/senyz-warp/install-complete"
+V2RAY_GUARD_DROPIN="/etc/systemd/system/v2ray.service.d/90-senyz-warp.conf"
 BACKUP_DIR=""
 TEMP_FILES=()
 
@@ -68,8 +71,9 @@ Usage:
   ./rebuild_server.sh --domain senyz.top --email you@example.com [--yes]
 
 This script is intended only for a freshly reinstalled Debian 12 or Debian 13
-server with a root SSH public key already injected by DMIT. It installs the
-base VMess + WebSocket + TLS proxy. It does not install or connect WARP.
+VPS with systemd, public IPv4, root access, and a root SSH public key already
+installed by the VPS provider or owner. It builds the base VMess + WebSocket +
+TLS proxy, but leaves V2Ray stopped until the guided WARP phase succeeds.
 EOF
 }
 
@@ -123,7 +127,7 @@ for command_name in apt-get awk base64 curl grep install mapfile sed sort ssh-ke
     command -v "${command_name}" >/dev/null 2>&1 || die "Required command is missing: ${command_name}"
 done
 [[ -s /root/.ssh/authorized_keys ]] \
-    || die 'No root SSH public key was found. Select your own public key in DMIT before rebuilding.'
+    || die 'No root SSH public key was found. Add your own public key through the VPS provider before rebuilding.'
 ssh-keygen -l -f /root/.ssh/authorized_keys >/dev/null 2>&1 \
     || die 'The root authorized_keys file does not contain a readable SSH public key.'
 
@@ -146,9 +150,14 @@ fi
 
 log 'Checking the DNS-only A record before changing the server.'
 public_ip="$(curl -4 -fsS --connect-timeout 8 --max-time 20 \
-    https://www.cloudflare.com/cdn-cgi/trace \
-    | awk -F= '$1 == "ip" {print $2; exit}')"
-[[ -n "${public_ip}" ]] || die 'Could not determine the server public IPv4 address.'
+    https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
+    | awk -F= '$1 == "ip" {print $2; exit}' || true)"
+if [[ ! "${public_ip}" =~ ^[0-9]+([.][0-9]+){3}$ ]]; then
+    public_ip="$(curl -4 -fsS --connect-timeout 8 --max-time 20 \
+        https://api.ipify.org 2>/dev/null || true)"
+fi
+[[ "${public_ip}" =~ ^[0-9]+([.][0-9]+){3}$ ]] \
+    || die 'Could not determine the server public IPv4 address.'
 mapfile -t domain_ips < <(dig +time=5 +tries=2 +short A "${DOMAIN}" \
     | awk '/^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ {print}' | sort -u)
 (( ${#domain_ips[@]} > 0 )) || die "DNS does not resolve ${DOMAIN}."
@@ -177,11 +186,11 @@ Clean base rebuild ${SCRIPT_VERSION}
   Debian:       ${VERSION_ID}
   Domain:       ${DOMAIN}
   V2Ray:        ${V2RAY_VERSION}
-  WARP:         not installed in this phase
+  WARP:         required before client delivery
   SSH:          root public-key login only
 
-Keep this SSH window open. The guided launcher continues after a second SSH
-window and the DMIT Serial Console have been verified.
+The guided launcher will continue automatically. A provider console or second
+SSH session is optional; the WARP phase installs its own timed route rollback.
 EOF
 
 if (( ASSUME_YES == 0 )); then
@@ -309,7 +318,7 @@ public_challenge_result="$(curl -4 -fsS --max-time 20 \
     "http://${DOMAIN}/.well-known/acme-challenge/${challenge_name}" || true)"
 rm -f "${challenge_file}"
 [[ "${public_challenge_result}" == "${challenge_name}" ]] \
-    || die 'Port 80 or the public HTTP challenge path is not reachable.'
+    || die 'The public HTTP challenge is unreachable. Check DNS, the VPS provider firewall/security group, and TCP port 80.'
 
 log "Obtaining a Let's Encrypt certificate with Webroot renewal."
 certbot certonly --non-interactive --agree-tos \
@@ -533,21 +542,38 @@ https_code="$(curl -sS --resolve "${DOMAIN}:443:127.0.0.1" \
     --output /dev/null --write-out '%{http_code}' "https://${DOMAIN}/")"
 [[ "${https_code}" == '404' ]] || die "Unexpected local HTTPS response: ${https_code}"
 
+log 'Holding V2Ray stopped until the guided WARP phase passes verification.'
+install -d -m 0755 "$(dirname "${V2RAY_GUARD_DROPIN}")"
+cat > "${V2RAY_GUARD_DROPIN}" <<EOF
+[Unit]
+Description=Do not start V2Ray before verified WARP is available
+
+[Service]
+ExecStartPre=/usr/bin/test -f ${WARP_COMPLETE_MARKER}
+EOF
+chmod 0644 "${V2RAY_GUARD_DROPIN}"
+touch "${AWAITING_WARP_MARKER}"
+chmod 0600 "${AWAITING_WARP_MARKER}"
+systemctl daemon-reload
+systemctl stop v2ray
+if systemctl is-active --quiet v2ray; then
+    die 'V2Ray could not be placed into the protected pre-WARP state.'
+fi
+
 {
     printf 'Base rebuild: PASS\n'
     printf 'Completed UTC: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'Debian: %s\n' "${VERSION_ID}"
     printf 'Domain: %s\n' "${DOMAIN}"
     printf 'V2Ray: %s\n' "${V2RAY_VERSION}"
-    printf 'WARP: not installed by the base phase\n'
+    printf 'WARP: pending; V2Ray held stopped until verified\n'
     printf 'Client details: %s (mode 600)\n' "${CLIENT_FILE}"
 } > "${RESULT_FILE}"
 chmod 600 "${RESULT_FILE}"
 
 printf '\n============================================================\n'
 printf 'Base rebuild complete. WARP has not been installed or connected.\n'
-printf 'Client details are protected in %s.\n' "${CLIENT_FILE}"
-printf 'Use this simple command whenever you need them:\n  senyz-show-client\n'
+printf 'V2Ray is intentionally stopped, and client details are not delivered yet.\n'
 printf '\nLog:    %s\n' "${LOG_FILE}"
 printf 'Result: %s\n' "${RESULT_FILE}"
 printf 'Backup: %s\n' "${BACKUP_DIR}"
@@ -555,12 +581,11 @@ if [[ -x "${VERIFY_TARGET}" ]]; then
     printf 'Verify: %s\n' "${VERIFY_TARGET}"
 fi
 if [[ -x "${WARP_FILE}" ]]; then
-    printf '\nReturn to the guided launcher for the safety checkpoint and WARP phase.\n'
-    printf 'If that launcher was closed, use the single continuation command it installed:\n'
-    printf '  /root/senyz-finish-rebuild\n'
+    printf '\nReturn to the guided launcher for the protected WARP phase.\n'
+    printf 'If that launcher was closed, use its single continuation command.\n'
 else
     printf '\nWARP manager is missing; do not use an unpinned replacement.\n'
 fi
 if [[ -e /var/run/reboot-required ]]; then
-    printf '\nDebian requests a reboot. Finish the base checks before rebooting.\n'
+    printf '\nDebian requests a reboot. Finish the guided deployment before rebooting.\n'
 fi
