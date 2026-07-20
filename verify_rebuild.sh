@@ -7,7 +7,7 @@ set -uo pipefail
 umask 077
 export LC_ALL=C
 
-SCRIPT_VERSION="3.0.0-rc2"
+SCRIPT_VERSION="3.0.0-rc3"
 STATE_ENV="/etc/senyz-proxy/deployment.env"
 SITE_FILE="/etc/nginx/sites-available/senyz-proxy"
 CLIENT_FILE="/root/senyz-client.txt"
@@ -16,6 +16,11 @@ RESUME_WARP=0
 WARP_STAGED_MARKER="/var/lib/senyz-warp/install-staged"
 WARP_COMPLETE_MARKER="/var/lib/senyz-warp/install-complete"
 WARP_STOP_MARKER="/var/lib/senyz-warp/managed-service-stopped"
+AWAITING_WARP_MARKER="/etc/senyz-proxy/awaiting-warp"
+V2RAY_GUARD_FILE="/etc/systemd/system/v2ray.service.d/90-senyz-warp.conf"
+SAFETY_ROLLBACK="/usr/local/sbin/senyz-warp-safety-rollback"
+SAFETY_ROLLBACK_UNIT="/etc/systemd/system/senyz-warp-safety-rollback.service"
+SAFETY_ROLLBACK_TIMER="/etc/systemd/system/senyz-warp-safety-rollback.timer"
 PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
@@ -122,17 +127,19 @@ done
 
 service_active ssh 'SSH'
 service_active nginx 'Nginx'
-protected_resume=0
-if (( RESUME_WARP == 1 )) \
+protected_wait=0
+if [[ -f "${AWAITING_WARP_MARKER}" && ! -f "${WARP_COMPLETE_MARKER}" ]]; then
+    protected_wait=1
+elif (( RESUME_WARP == 1 )) \
     && [[ -f "${WARP_STAGED_MARKER}" ]] \
     && [[ -f "${WARP_STOP_MARKER}" ]] \
     && [[ ! -f "${WARP_COMPLETE_MARKER}" ]]; then
-    protected_resume=1
+    protected_wait=1
 fi
-if (( protected_resume == 1 )) && systemctl is-active --quiet v2ray; then
-    fail 'V2Ray is active despite a recorded WARP fail-closed stop marker.'
-elif (( protected_resume == 1 )); then
-    warn 'V2Ray is stopped by the recorded WARP fail-closed stage; the installer may resume it.'
+if (( protected_wait == 1 )) && systemctl is-active --quiet v2ray; then
+    fail 'V2Ray is active while the deployment is waiting for verified WARP.'
+elif (( protected_wait == 1 )); then
+    pass 'V2Ray is held stopped until WARP passes verification.'
 else
     service_active v2ray 'V2Ray'
 fi
@@ -186,8 +193,8 @@ listeners="$(ss -H -lnt 2>/dev/null || true)"
 v2ray_listeners="$(awk '$4 ~ /:10001$/ {print $4}' <<<"${listeners}")"
 if [[ "${v2ray_listeners}" == '127.0.0.1:10001' ]]; then
     pass 'V2Ray listens only on 127.0.0.1:10001.'
-elif (( protected_resume == 1 )) && [[ -z "${v2ray_listeners}" ]]; then
-    warn 'V2Ray port 10001 is absent while the recorded WARP fail-closed stage is active.'
+elif (( protected_wait == 1 )) && [[ -z "${v2ray_listeners}" ]]; then
+    pass 'V2Ray port 10001 is closed while the pre-WARP protection is active.'
 else
     fail 'V2Ray port 10001 is missing or exposed on an unexpected address.'
 fi
@@ -260,10 +267,23 @@ fi
 private_mode "${STATE_ENV}" 'deployment metadata'
 private_mode "${CLIENT_FILE}" 'client details'
 private_mode /root/senyz-base-rebuild.log 'base rebuild log'
+if [[ -f "${AWAITING_WARP_MARKER}" ]]; then
+    private_mode "${AWAITING_WARP_MARKER}" 'pre-WARP protection marker'
+fi
 if [[ -x /usr/local/sbin/senyz-show-client ]]; then
     pass 'The simple client-display command is installed.'
 else
     fail 'The simple client-display command is missing.'
+fi
+
+if (( protected_wait == 1 )); then
+    if [[ -r "${V2RAY_GUARD_FILE}" ]] \
+        && { grep -Fq 'ExecStartPre=/usr/bin/test -f /var/lib/senyz-warp/install-complete' "${V2RAY_GUARD_FILE}" \
+            || grep -Fq 'ExecStartPre=/usr/local/sbin/senyz-warp-health --quiet' "${V2RAY_GUARD_FILE}"; }; then
+        pass 'The pre-WARP V2Ray startup guard is installed.'
+    else
+        fail 'The pre-WARP V2Ray startup guard is missing.'
+    fi
 fi
 
 if dpkg-query -W unattended-upgrades >/dev/null 2>&1 \
@@ -317,6 +337,9 @@ else
     fi
     if [[ -f "${WARP_COMPLETE_MARKER}" ]]; then
         private_mode "${WARP_COMPLETE_MARKER}" 'WARP completion marker'
+        if [[ -f "${AWAITING_WARP_MARKER}" ]]; then
+            fail 'The pre-WARP marker still exists after recorded WARP completion.'
+        fi
     elif (( REQUIRE_WARP == 1 )); then
         fail 'The WARP installation has not recorded successful completion.'
     else
@@ -335,6 +358,18 @@ else
         pass 'The WARP watchdog timer is enabled and active.'
     else
         fail 'The WARP watchdog timer is not enabled and active.'
+    fi
+    if [[ -x "${SAFETY_ROLLBACK}" \
+        && -r "${SAFETY_ROLLBACK_UNIT}" \
+        && -r "${SAFETY_ROLLBACK_TIMER}" ]]; then
+        pass 'The timed WARP route-rollback protection is installed.'
+    else
+        fail 'The timed WARP route-rollback protection is incomplete.'
+    fi
+    if systemctl is-active --quiet senyz-warp-safety-rollback.timer; then
+        fail 'The route-rollback timer is still armed after WARP completion.'
+    else
+        pass 'The route-rollback timer is disarmed after WARP verification.'
     fi
     if [[ -x /usr/local/sbin/senyz-warp-health ]] \
         && /usr/local/sbin/senyz-warp-health --quiet; then
