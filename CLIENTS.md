@@ -1,99 +1,92 @@
 # Windows、macOS 与 iPhone 客户端设置
 
-更新日期：2026-07-18
+更新日期：2026-07-21
 
-## 共同参数
+## 先分清当前节点和新节点
 
-所有设备使用同一组服务器参数，但各自保存节点配置：
+当前旧服务器的客户端可以继续使用原配置。rc3 全新重装会生成新的 VMess UUID 和随机 WebSocket 路径，因此即使域名仍是 `senyz.top`，也必须导入脚本最后生成的新链接，不能沿用旧 `/ray` 路径或只改服务器 IP。
 
-| 项目 | 值 |
+WARP 完全属于服务器端。Shadowrocket 和 v2rayN 不需要填写 WARP 参数；只有服务器最终显示 `Result: PASS` 后才导入节点。
+
+## 推荐方式：直接导入
+
+成功安装后，终端会显示一行 `vmess://...` 和二维码。以后需要重新显示：
+
+```bash
+senyz-show-client link
+senyz-show-client qr
+```
+
+完整链接、二维码、UUID 和随机路径都是凭据，不发送到聊天、GitHub 或公开截图。
+
+导入后的共同特征应为：
+
+| 项目 | rc3 新节点 |
 |---|---|
 | 协议 | VMess |
-| 地址 | `senyz.top` |
+| 地址 | 安装时输入的域名 |
 | 端口 | `443` |
-| UUID | 当前服务器生成的私密值 |
+| UUID | 本次安装随机生成 |
 | AlterId | `0` |
 | 加密 | `auto` |
 | 传输 | WebSocket |
-| WebSocket 路径 | `/ray` |
-| Host | `senyz.top` |
+| WebSocket 路径 | 本次安装随机生成，不是固定 `/ray` |
+| Host | 与域名相同 |
 | TLS | 开启 |
-| SNI/Server Name | `senyz.top` |
+| SNI/Server Name | 与域名相同 |
 | 跳过证书验证 | 关闭 |
 
-Webroot 续期、TLS 版本和 Nginx 超时都属于服务器端设置，不会改变这些客户端参数。
+## macOS Shadowrocket
 
-## Windows v2rayN
+1. 复制终端显示的完整 `vmess://...` 链接。
+2. 在 Shadowrocket 中选择从剪贴板导入。
+3. 选中新节点，路由选择“代理/Proxy”。
+4. 开启连接并允许 macOS 添加系统 VPN 配置。
+5. 先访问普通网站，再使用重要账号。
 
-### 导入链接
-
-全新重建脚本完成后，服务器会把链接保存在：
-
-```bash
-cat /root/senyz-client.txt
-```
-
-在 v2rayN 中使用“从剪贴板导入批量 URL”，然后选择新节点。不要把完整 `vmess://` 链接发送到聊天或公开保存，因为其中包含 UUID。
-
-### 手工检查
-
-打开节点编辑窗口，逐项核对共同参数。保存后：
-
-1. 选择该节点。
-2. 打开“设置系统代理”。
-3. 保持 TUN 关闭作为日常默认。
-4. 用浏览器打开普通外网和 AI 服务入口测试。
-
-只有某个 Windows 原生 App 明确不走系统代理时，才测试 TUN。开启 TUN 前先退出其他 VPN、代理或网络加速软件，避免多个虚拟网卡同时接管路由。
-
-## macOS
-
-可以使用 macOS 版 v2rayN，也可以使用 Shadowrocket，二选一。
-
-### Shadowrocket
-
-1. 新增节点，类型选 VMess。
-2. 填写共同参数。
-3. 传输方式选 WebSocket，路径填 `/ray`，Host 填 `senyz.top`。
-4. 开启 TLS，Server Name 填 `senyz.top`，关闭“跳过证书验证”。
-5. 启动 Shadowrocket 的系统 VPN 后测试网页和 App。
-
-不要同时让 v2rayN 和 Shadowrocket 接管 macOS 网络。首次切换客户端时应先完全退出另一个客户端。
+不要同时让 Shadowrocket、v2rayN、其他 VPN 或网络加速工具接管 macOS 网络。Shadowrocket 使用系统网络扩展是正常现象，不需要另行开启类似 Windows v2rayN 的 TUN 开关。
 
 ## iPhone Shadowrocket
 
-1. 点右上角 `+`，类型选择 VMess。
-2. 填写地址、端口、UUID、AlterId 和加密方式。
-3. 传输选择 WebSocket，路径 `/ray`，Host `senyz.top`。
-4. 开启 TLS，SNI 填 `senyz.top`，关闭跳过证书验证。
-5. 保存并选择节点，打开顶部连接开关。
+1. 扫描终端二维码，或复制 `vmess://...` 后从剪贴板导入。
+2. 选中新节点，路由选择“代理/Proxy”。
+3. 允许 iOS 添加 VPN 配置并开启连接。
+4. iOS 顶部出现 VPN 图标是正常现象。
 
-iOS 显示 VPN 图标是正常现象；它表示 Shadowrocket 使用系统网络扩展，服务端仍然是 V2Ray 代理。
+macOS 和 iPhone 尽量使用同一节点，不在同一个账号会话中频繁切换线路。
 
-## 什么时候需要改客户端
+## Windows v2rayN
 
-以下服务器操作不需要改客户端：
+Windows 暂时不使用时无需改动。以后恢复使用：
 
-- standalone 改成 Webroot 续期。
-- TLS 只保留 1.2/1.3。
-- WebSocket 超时改成 3600 秒。
-- Nginx、V2Ray 或服务器正常重启。
+1. 复制完整 `vmess://...`。
+2. 在 v2rayN 中选择“从剪贴板导入批量 URL”。
+3. 选中新节点并开启系统代理。
+4. 日常先保持 TUN 关闭。
 
-以下情况需要改客户端：
+只有明确确认某个 Windows 原生 App 不遵守系统代理时，才单独测试 TUN。开启前退出其他 VPN、代理或网络加速软件，避免多个虚拟网卡同时接管路由。TUN 不能修复服务器端 WARP、证书或账号问题。
 
-- 轮换 VMess UUID：所有设备只更新 UUID。
-- 域名、端口、路径或协议发生变化：更新对应参数。
-- 服务器 IP 改变但仍使用同一域名：先更新 DNS，客户端通常仍使用域名，不需要改 IP。
+## 什么时候需要重新导入
 
-如果 VMess UUID 曾出现在聊天、截图或分享链接中，建议在服务器端生成新 UUID 后，再把所有设备的节点 UUID 一次更新完成。只改客户端而不改服务器，或只改服务器而漏掉某台设备，都会使对应客户端无法连接。域名、端口、WebSocket 路径、Host、TLS 和 SNI 不需要随 UUID 一起改变。
+需要重新导入：
 
-## ChatGPT/Codex 出现重连
+- 重新安装服务器，因为 UUID 和随机路径会变化；
+- 更换域名、端口、协议或 TLS 名称；
+- 主动轮换 VMess UUID。
 
-1. 先等待自动恢复。
-2. 查看 <https://status.openai.com/>。
-3. 确认代理客户端仍在运行且当前节点已选中。
-4. 完全退出 App，再创建新任务。
-5. 用浏览器访问同一服务，区分 App 问题与整个代理问题。
-6. 多个网站都失败时，再登录服务器检查 Nginx、V2Ray、WARP 和证书。
+通常不需要改客户端：
 
-一次重连不能证明服务器 IP、账号或模型发生变化。回答速度也不能单独验证后台实际推理强度。
+- 证书自动续期；
+- Nginx、V2Ray 或服务器正常重启；
+- 服务器 IPv4 改变，但域名、UUID、路径和其他配置均保持不变且 DNS 已更新。
+
+## App 出现重连
+
+1. 等待 30 至 60 秒观察是否自动恢复。
+2. 确认 Shadowrocket/v2rayN 仍连接到预期节点。
+3. 用浏览器测试多个普通网站，区分单个 App 与整个网络。
+4. 查看对应服务的官方状态页。
+5. 完全退出并重新打开 App。
+6. 只有多个网站同时失败时，再运行服务器只读验收。
+
+一次 App 重连通常不需要重装服务器，也不应同时切换 VPS、域名、WARP 和客户端模式。
