@@ -1,29 +1,47 @@
 #!/usr/bin/env bash
 
+# Manage a fail-closed Cloudflare WARP egress on Debian 12/13.
+# This script uses only Cloudflare's official Linux package and warp-cli.
+
 set -Eeuo pipefail
 IFS=$'\n\t'
+umask 077
+export LC_ALL=C
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="3.0.0-rc3"
 CONFIG_DIR="/etc/senyz-warp"
 ROUTE_ENV="${CONFIG_DIR}/route.env"
 SETTINGS_ENV="${CONFIG_DIR}/settings.env"
 STATE_DIR="/var/lib/senyz-warp"
-WATCHDOG_MARKER="${STATE_DIR}/managed-service-stopped"
-TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
+INSTALL_STAGED_MARKER="${STATE_DIR}/install-staged"
+INSTALL_COMPLETE_MARKER="${STATE_DIR}/install-complete"
+STOP_MARKER="${STATE_DIR}/managed-service-stopped"
+DESIRED_MARKER="${STATE_DIR}/managed-service-should-run"
+FAILURE_COUNT_FILE="${STATE_DIR}/transient-failures"
 ROUTE_GUARD="/usr/local/sbin/senyz-warp-route-guard"
+HEALTH_PROBE="/usr/local/sbin/senyz-warp-health"
 WATCHDOG="/usr/local/sbin/senyz-warp-watchdog"
+SAFETY_ROLLBACK="/usr/local/sbin/senyz-warp-safety-rollback"
 ROUTE_UNIT="senyz-warp-route-guard.service"
 WATCHDOG_UNIT="senyz-warp-watchdog.service"
 WATCHDOG_TIMER="senyz-warp-watchdog.timer"
+SAFETY_ROLLBACK_UNIT="senyz-warp-safety-rollback.service"
+SAFETY_ROLLBACK_TIMER="senyz-warp-safety-rollback.timer"
 WARP_SERVICE="warp-svc.service"
+AWAITING_WARP_MARKER="/etc/senyz-proxy/awaiting-warp"
+CLOUDFLARE_REPO_KEY_FINGERPRINT="C068A2B5771775193CBE1F2F6E2DD2174FA1C3BA"
+REGISTRATION_MAX_ATTEMPTS=3
+REGISTRATION_RETRY_DELAYS=(30 90)
 
-REQUESTED_MANAGED_SERVICE="${MANAGED_SERVICE:-}"
-REQUESTED_WARP_PROTOCOL="${WARP_PROTOCOL:-}"
-REQUESTED_FAIL_CLOSED="${FAIL_CLOSED:-}"
+REQUESTED_SERVICE="${WARP_MANAGED_SERVICE:-${MANAGED_SERVICE:-}}"
+REQUESTED_PROTOCOL="${WARP_PROTOCOL:-}"
+REQUESTED_LIMIT="${WARP_TRANSIENT_LIMIT:-}"
+WARP_MANAGED_SERVICE="${REQUESTED_SERVICE:-v2ray}"
+WARP_PROTOCOL="${REQUESTED_PROTOCOL:-MASQUE}"
+WARP_TRANSIENT_LIMIT="${REQUESTED_LIMIT:-3}"
+CLOUDFLARE_WARP_VERSION="${CLOUDFLARE_WARP_VERSION:-}"
 ASSUME_YES=0
-MANAGED_SERVICE="${MANAGED_SERVICE:-v2ray}"
-WARP_PROTOCOL="${WARP_PROTOCOL:-MASQUE}"
-FAIL_CLOSED="${FAIL_CLOSED:-1}"
+TEMP_FILES=()
 
 log() {
     printf '[senyz-warp] %s\n' "$*"
@@ -39,36 +57,36 @@ die() {
 }
 
 cleanup() {
-    if [[ -n "${TEMP_KEY_FILE:-}" && -f "${TEMP_KEY_FILE}" ]]; then
-        rm -f -- "${TEMP_KEY_FILE}"
-    fi
+    local file
+    for file in "${TEMP_FILES[@]:-}"; do
+        if [[ -n "${file}" ]]; then
+            rm -f -- "${file}" 2>/dev/null || true
+        fi
+    done
 }
-
 trap cleanup EXIT
 
 require_root() {
-    [[ "${EUID}" -eq 0 ]] || die "请使用 root 运行，例如：sudo ./warp.sh $*"
+    [[ ${EUID} -eq 0 ]] || die "Run this command as root: $*"
 }
 
 require_supported_system() {
-    [[ -r /etc/os-release ]] || die "无法识别操作系统。"
-    # shellcheck disable=SC1091
-    source /etc/os-release
+    local architecture
 
-    [[ "${ID:-}" == "debian" ]] || die "本脚本只支持 Debian 12/13。"
+    [[ -r /etc/os-release ]] || die 'Cannot identify the operating system.'
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    [[ "${ID:-}" == 'debian' ]] || die 'Only Debian is supported.'
     case "${VERSION_ID:-}" in
         12|13) ;;
-        *) die "当前 Debian ${VERSION_ID:-unknown} 不在 Cloudflare 官方支持范围内。" ;;
+        *) die "Debian ${VERSION_ID:-unknown} is not supported." ;;
     esac
+    [[ -d /run/systemd/system ]] || die 'systemd is required.'
 
-    command -v systemctl >/dev/null 2>&1 || die "系统未使用 systemd。"
-    command -v ip >/dev/null 2>&1 || die "缺少 iproute2，无法保护 SSH 路由。"
-
-    local architecture
     architecture="$(dpkg --print-architecture 2>/dev/null || true)"
     case "${architecture}" in
         amd64|arm64) ;;
-        *) die "Cloudflare WARP 当前仅支持 amd64/arm64；检测到 ${architecture:-unknown}。" ;;
+        *) die "Cloudflare WARP does not support architecture ${architecture:-unknown}." ;;
     esac
 }
 
@@ -76,71 +94,122 @@ confirm() {
     local prompt="$1"
     local answer
 
-    if [[ "${ASSUME_YES}" -eq 1 ]]; then
+    if (( ASSUME_YES == 1 )); then
         return 0
     fi
-    [[ -t 0 ]] || die "非交互运行需要附加 --yes。"
+    [[ -t 0 ]] || die 'Non-interactive use requires --yes.'
     printf '%s\n' "${prompt}"
-    read -r -p "输入 YES 继续：" answer
-    [[ "${answer}" == "YES" ]] || die "操作已取消。"
+    read -r -p 'Type YES to continue: ' answer
+    [[ "${answer}" == 'YES' ]] || die 'Cancelled.'
 }
 
 load_settings() {
-    local requested_service="${REQUESTED_MANAGED_SERVICE}"
-    local requested_protocol="${REQUESTED_WARP_PROTOCOL}"
-    local requested_fail_closed="${REQUESTED_FAIL_CLOSED}"
+    local requested_service="${REQUESTED_SERVICE}"
+    local requested_protocol="${REQUESTED_PROTOCOL}"
+    local requested_limit="${REQUESTED_LIMIT}"
 
     if [[ -r "${SETTINGS_ENV}" ]]; then
         # shellcheck disable=SC1090
-        source "${SETTINGS_ENV}"
+        . "${SETTINGS_ENV}"
+        if [[ -n "${requested_service}" && "${requested_service}" != "${WARP_MANAGED_SERVICE}" ]]; then
+            die 'WARP_MANAGED_SERVICE cannot be changed after installation.'
+        fi
+        if [[ -n "${requested_protocol}" && "${requested_protocol}" != "${WARP_PROTOCOL}" ]]; then
+            die 'WARP_PROTOCOL cannot be changed implicitly after installation.'
+        fi
+        if [[ -n "${requested_limit}" && "${requested_limit}" != "${WARP_TRANSIENT_LIMIT}" ]]; then
+            die 'WARP_TRANSIENT_LIMIT cannot be changed implicitly after installation.'
+        fi
+        return 0
     fi
-    if [[ -n "${requested_service}" ]]; then
-        MANAGED_SERVICE="${requested_service}"
-    fi
-    if [[ -n "${requested_protocol}" ]]; then
-        WARP_PROTOCOL="${requested_protocol}"
-    fi
-    if [[ -n "${requested_fail_closed}" ]]; then
-        FAIL_CLOSED="${requested_fail_closed}"
-    fi
-    return 0
 }
 
 validate_settings() {
-    [[ "${MANAGED_SERVICE}" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "MANAGED_SERVICE 名称不合法。"
+    [[ "${WARP_MANAGED_SERVICE}" =~ ^[A-Za-z0-9_.@-]+$ ]] \
+        || die 'WARP_MANAGED_SERVICE contains unsupported characters.'
+    case "${WARP_MANAGED_SERVICE}" in
+        ssh|sshd|nginx|warp-svc|senyz-warp-*)
+            die "Refusing unsafe managed service: ${WARP_MANAGED_SERVICE}"
+            ;;
+    esac
     case "${WARP_PROTOCOL}" in
         MASQUE|WireGuard) ;;
-        *) die "WARP_PROTOCOL 只能是 MASQUE 或 WireGuard（区分大小写）。" ;;
+        *) die 'WARP_PROTOCOL must be MASQUE or WireGuard.' ;;
     esac
-    case "${FAIL_CLOSED}" in
-        0|1) ;;
-        *) die "FAIL_CLOSED 只能是 0 或 1。" ;;
-    esac
-}
-
-legacy_wgcf_present() {
-    [[ -e /etc/wireguard/wgcf.conf ]] || \
-        systemctl is-active --quiet wg-quick@wgcf.service 2>/dev/null || \
-        systemctl is-enabled --quiet wg-quick@wgcf.service 2>/dev/null
-}
-
-refuse_legacy_install() {
-    if legacy_wgcf_present; then
-        die "检测到旧 wgcf/WireGuard 配置。为避免 SSH 断开，本脚本不会覆盖迁移；请在下一次干净重装后使用。"
+    [[ "${WARP_TRANSIENT_LIMIT}" =~ ^[0-9]+$ ]] \
+        || die 'WARP_TRANSIENT_LIMIT must be an integer.'
+    (( WARP_TRANSIENT_LIMIT >= 2 && WARP_TRANSIENT_LIMIT <= 10 )) \
+        || die 'WARP_TRANSIENT_LIMIT must be between 2 and 10.'
+    if [[ -n "${CLOUDFLARE_WARP_VERSION}" ]]; then
+        [[ "${CLOUDFLARE_WARP_VERSION}" =~ ^[A-Za-z0-9.+:~_-]+$ ]] \
+            || die 'CLOUDFLARE_WARP_VERSION contains unsupported characters.'
     fi
 }
 
+service_exists() {
+    [[ "$(systemctl show -p LoadState --value "${WARP_MANAGED_SERVICE}.service" 2>/dev/null || true)" == 'loaded' ]]
+}
+
+legacy_wgcf_present() {
+    [[ -e /etc/wireguard/wgcf.conf ]] \
+        || systemctl is-active --quiet wg-quick@wgcf.service 2>/dev/null \
+        || systemctl is-enabled --quiet wg-quick@wgcf.service 2>/dev/null
+}
+
+write_settings() {
+    install -d -m 0700 "${CONFIG_DIR}" "${STATE_DIR}"
+    {
+        printf 'WARP_MANAGED_SERVICE=%q\n' "${WARP_MANAGED_SERVICE}"
+        printf 'WARP_PROTOCOL=%q\n' "${WARP_PROTOCOL}"
+        printf 'WARP_TRANSIENT_LIMIT=%q\n' "${WARP_TRANSIENT_LIMIT}"
+    } > "${SETTINGS_ENV}"
+    chmod 0600 "${SETTINGS_ENV}"
+}
+
+mark_install_staged() {
+    install -d -m 0700 "${STATE_DIR}"
+    touch "${INSTALL_STAGED_MARKER}"
+    chmod 0600 "${INSTALL_STAGED_MARKER}"
+    rm -f "${INSTALL_COMPLETE_MARKER}"
+    install -d -m 0700 "$(dirname "${AWAITING_WARP_MARKER}")"
+    touch "${AWAITING_WARP_MARKER}"
+    chmod 0600 "${AWAITING_WARP_MARKER}"
+}
+
+mark_install_complete() {
+    install -d -m 0700 "${STATE_DIR}"
+    touch "${INSTALL_COMPLETE_MARKER}"
+    chmod 0600 "${INSTALL_COMPLETE_MARKER}"
+    rm -f "${INSTALL_STAGED_MARKER}"
+    rm -f "${AWAITING_WARP_MARKER}"
+}
+
+install_staging_service_guard() {
+    local dropin_dir
+    dropin_dir="/etc/systemd/system/${WARP_MANAGED_SERVICE}.service.d"
+    install -d -m 0755 "${dropin_dir}"
+    cat > "${dropin_dir}/90-senyz-warp.conf" <<EOF
+[Unit]
+Description=Do not start ${WARP_MANAGED_SERVICE} before verified WARP is available
+
+[Service]
+ExecStartPre=/usr/bin/test -f ${INSTALL_COMPLETE_MARKER}
+EOF
+    chmod 0644 "${dropin_dir}/90-senyz-warp.conf"
+    systemctl daemon-reload
+}
+
 install_dependencies() {
-    log "安装基础依赖。"
+    log 'Installing required Debian packages.'
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl gnupg lsb-release util-linux iproute2
+    apt-get install -y ca-certificates curl gnupg util-linux iproute2
 }
 
 rule_priority_in_use() {
     local priority="$1"
-    ip -4 rule show | awk -v key="${priority}:" '$1 == key { found=1 } END { exit !found }' || \
-        ip -6 rule show | awk -v key="${priority}:" '$1 == key { found=1 } END { exit !found }'
+    ip -4 rule show | awk -v key="${priority}:" '$1 == key {found=1} END {exit !found}' \
+        || ip -6 rule show | awk -v key="${priority}:" '$1 == key {found=1} END {exit !found}'
 }
 
 choose_rule_priority() {
@@ -151,13 +220,15 @@ choose_rule_priority() {
             return 0
         fi
     done
-    die "策略路由优先级 18-27 均被占用，无法安全安装。"
+    die 'Policy-routing priorities 18 through 27 are already in use.'
 }
 
 route_field() {
     local route_line="$1"
     local field="$2"
-    awk -v wanted="${field}" '{ for (i=1; i<=NF; i++) if ($i == wanted && i < NF) { print $(i+1); exit } }' <<<"${route_line}"
+    awk -v wanted="${field}" \
+        '{for (i=1; i<=NF; i++) if ($i == wanted && i < NF) {print $(i+1); exit}}' \
+        <<<"${route_line}"
 }
 
 capture_management_route() {
@@ -167,7 +238,8 @@ capture_management_route() {
     src4="$(route_field "${route4}" src)"
     dev4="$(route_field "${route4}" dev)"
     gateway4="$(route_field "${route4}" via)"
-    [[ -n "${src4}" && -n "${dev4}" ]] || die "无法读取服务器原始 IPv4 路由，未启用 WARP。"
+    [[ -n "${src4}" && -n "${dev4}" ]] \
+        || die 'Could not capture the original IPv4 management route.'
 
     route6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | head -n 1 || true)"
     src6="$(route_field "${route6}" src)"
@@ -184,38 +256,28 @@ capture_management_route() {
         printf 'IPV6_SOURCE=%q\n' "${src6}"
         printf 'IPV6_DEVICE=%q\n' "${dev6}"
         printf 'IPV6_GATEWAY=%q\n' "${gateway6}"
-    } >"${ROUTE_ENV}"
+    } > "${ROUTE_ENV}"
     chmod 0600 "${ROUTE_ENV}"
 
-    log "已记录管理路由：IPv4 ${src4} / ${dev4}；规则优先级 ${priority}。"
+    log "Captured the direct IPv4 management route on ${dev4}."
     if [[ -n "${src6}" ]]; then
-        log "已记录 IPv6 管理路由：${src6} / ${dev6}。"
+        log "Captured the direct IPv6 management route on ${dev6}."
     else
-        warn "没有检测到原始 IPv6 默认路由；继续使用 IPv4 管理通道。"
+        warn 'No native IPv6 management route was found; SSH protection uses IPv4.'
     fi
 }
 
-write_settings() {
-    install -d -m 0700 "${CONFIG_DIR}" "${STATE_DIR}"
-    {
-        printf 'MANAGED_SERVICE=%q\n' "${MANAGED_SERVICE}"
-        printf 'WARP_PROTOCOL=%q\n' "${WARP_PROTOCOL}"
-        printf 'FAIL_CLOSED=%q\n' "${FAIL_CLOSED}"
-    } >"${SETTINGS_ENV}"
-    chmod 0600 "${SETTINGS_ENV}"
-}
-
 install_route_guard() {
-    [[ -s "${ROUTE_ENV}" ]] || die "缺少 ${ROUTE_ENV}。"
+    [[ -s "${ROUTE_ENV}" ]] || die "Missing ${ROUTE_ENV}."
 
-    cat >"${ROUTE_GUARD}" <<'ROUTE_GUARD_EOF'
+    cat > "${ROUTE_GUARD}" <<'ROUTE_GUARD_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
 ROUTE_ENV="/etc/senyz-warp/route.env"
 [[ -r "${ROUTE_ENV}" ]] || { echo "Missing ${ROUTE_ENV}" >&2; exit 1; }
 # shellcheck disable=SC1090
-source "${ROUTE_ENV}"
+. "${ROUTE_ENV}"
 
 ensure_rule() {
     local family="$1"
@@ -226,14 +288,15 @@ ensure_rule() {
     [[ -n "${source_address}" ]] || return 0
     existing="$(ip "-${family}" rule show | awk -v key="${RULE_PRIORITY}:" '$1 == key')"
     if [[ -n "${existing}" ]]; then
-        if grep -Fq "from ${source_address}" <<<"${existing}" && grep -Eq 'lookup (main|254)' <<<"${existing}"; then
+        if grep -Fq "from ${source_address}" <<<"${existing}" \
+            && grep -Eq 'lookup (main|254)' <<<"${existing}"; then
             return 0
         fi
         echo "Rule priority ${RULE_PRIORITY} is already used: ${existing}" >&2
         exit 1
     fi
-
-    ip "-${family}" rule add pref "${RULE_PRIORITY}" from "${source_address}${prefix}" lookup main
+    ip "-${family}" rule add pref "${RULE_PRIORITY}" \
+        from "${source_address}${prefix}" lookup main
 }
 
 ensure_rule 4 "${IPV4_SOURCE:-}" /32
@@ -241,7 +304,7 @@ ensure_rule 6 "${IPV6_SOURCE:-}" /128
 ROUTE_GUARD_EOF
     chmod 0755 "${ROUTE_GUARD}"
 
-    cat >"/etc/systemd/system/${ROUTE_UNIT}" <<EOF
+    cat > "/etc/systemd/system/${ROUTE_UNIT}" <<EOF
 [Unit]
 Description=Preserve direct management routes before Cloudflare WARP
 Wants=network-online.target
@@ -256,28 +319,34 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl daemon-reload
     systemctl enable --now "${ROUTE_UNIT}"
 }
 
 install_cloudflare_client() {
-    local codename
-    codename="$(lsb_release -cs)"
+    local codename key_file downloaded_fingerprints
+
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    codename="${VERSION_CODENAME:-}"
     case "${codename}" in
         bookworm|trixie) ;;
-        *) die "Cloudflare 官方软件源不支持 Debian 代号 ${codename}。" ;;
+        *) die "Cloudflare's repository does not support Debian codename ${codename:-unknown}." ;;
     esac
 
-    log "配置 Cloudflare 官方 APT 软件源。"
-    TEMP_KEY_FILE="$(mktemp)"
-    curl --proto '=https' --tlsv1.2 -fsSL \
-        https://pkg.cloudflareclient.com/pubkey.gpg \
-        -o "${TEMP_KEY_FILE}"
+    log "Configuring Cloudflare's official APT repository."
+    key_file="$(mktemp)"
+    TEMP_FILES+=("${key_file}")
+    curl --proto '=https' --tlsv1.2 -fsSLo "${key_file}" \
+        https://pkg.cloudflareclient.com/pubkey.gpg
+    downloaded_fingerprints="$(gpg --batch --show-keys --with-colons --fingerprint \
+        "${key_file}" 2>/dev/null | awk -F: '$1 == "fpr" {print $10}')"
+    grep -qx "${CLOUDFLARE_REPO_KEY_FINGERPRINT}" <<<"${downloaded_fingerprints}" \
+        || die 'The downloaded Cloudflare signing key fingerprint is unexpected.'
     install -d -m 0755 /usr/share/keyrings
     gpg --batch --yes --dearmor \
         --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
-        "${TEMP_KEY_FILE}"
+        "${key_file}"
     chmod 0644 /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
 
     printf '%s\n' \
@@ -286,59 +355,148 @@ install_cloudflare_client() {
 
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    if [[ -n "${CLOUDFLARE_WARP_VERSION:-}" ]]; then
+    if [[ -n "${CLOUDFLARE_WARP_VERSION}" ]]; then
         apt-get install -y "cloudflare-warp=${CLOUDFLARE_WARP_VERSION}"
     else
         apt-get install -y cloudflare-warp
     fi
+    command -v warp-cli >/dev/null 2>&1 || die 'warp-cli was not installed.'
     systemctl enable --now "${WARP_SERVICE}"
 }
 
 warp_cli() {
     if warp-cli --help 2>&1 | grep -q -- '--accept-tos'; then
-        warp-cli --accept-tos "$@"
+        LC_ALL=C warp-cli --accept-tos "$@"
     else
-        warp-cli "$@"
+        LC_ALL=C warp-cli "$@"
     fi
 }
 
+warp_cli_connected() {
+    local status
+    command -v warp-cli >/dev/null 2>&1 || return 1
+    systemctl is-active --quiet "${WARP_SERVICE}" || return 1
+    status="$(warp_cli status 2>&1 || true)"
+    grep -Eiq '(^|[^[:alpha:]])Connected([^[:alpha:]]|$)' <<<"${status}"
+}
+
 ensure_registration() {
-    if warp_cli registration show >/dev/null 2>&1; then
-        log "沿用现有 WARP 注册。"
-    else
-        log "创建新的 WARP consumer 注册。"
-        warp_cli registration new
+    local attempt delay_index registration registration_output registration_rc
+    if registration="$(warp_cli registration show 2>&1)" \
+        && ! grep -Eiq '(not registered|no registration|registration missing)' <<<"${registration}"; then
+        log 'Using the existing WARP consumer registration.'
+        return 0
     fi
+
+    for (( attempt=1; attempt<=REGISTRATION_MAX_ATTEMPTS; attempt++ )); do
+        log "Creating a WARP consumer registration (attempt ${attempt}/${REGISTRATION_MAX_ATTEMPTS})."
+        if registration_output="$(warp_cli registration new 2>&1)"; then
+            log 'The WARP consumer registration was created.'
+            return 0
+        else
+            registration_rc=$?
+        fi
+
+        if (( attempt < REGISTRATION_MAX_ATTEMPTS )); then
+            delay_index=$((attempt - 1))
+            if grep -Eiq '(^|[^0-9])429([^0-9]|$)|too many requests|rate.?limit' \
+                <<<"${registration_output}"; then
+                warn "Cloudflare temporarily limited registration; waiting ${REGISTRATION_RETRY_DELAYS[delay_index]} seconds before a controlled retry."
+            else
+                warn "Registration did not complete; waiting ${REGISTRATION_RETRY_DELAYS[delay_index]} seconds before a controlled retry."
+            fi
+            sleep "${REGISTRATION_RETRY_DELAYS[delay_index]}"
+            continue
+        fi
+
+        if grep -Eiq '(^|[^0-9])429([^0-9]|$)|too many requests|rate.?limit' \
+            <<<"${registration_output}"; then
+            warn 'Cloudflare registration is still temporarily limited after controlled retries.'
+            warn 'No WARP route switch was attempted, and the managed proxy remains stopped.'
+            return 75
+        fi
+
+        [[ -z "${registration_output}" ]] || printf '%s\n' "${registration_output}" >&2
+        warn 'Cloudflare WARP registration failed before any route switch.'
+        return "${registration_rc}"
+    done
+
+    return 75
 }
 
 configure_warp() {
     "${ROUTE_GUARD}"
     systemctl start "${ROUTE_UNIT}"
     systemctl enable --now "${WARP_SERVICE}"
-    ensure_registration
     warp_cli mode warp+doh
     warp_cli tunnel protocol set "${WARP_PROTOCOL}"
 }
 
-trace_for_family() {
+install_health_probe() {
+    cat > "${HEALTH_PROBE}" <<'HEALTH_EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+
+TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
+QUIET=0
+[[ "${1:-}" == '--quiet' ]] && QUIET=1
+
+probe_family() {
     local family="$1"
-    curl "-${family}" -fsS --connect-timeout 8 --max-time 15 "${TRACE_URL}"
+    local trace value
+    trace="$(curl --noproxy '*' "-${family}" -fsS --connect-timeout 8 \
+        --max-time 15 "${TRACE_URL}" 2>/dev/null || true)"
+    value="$(awk -F= '$1 == "warp" {print $2; exit}' <<<"${trace}")"
+    case "${value}" in
+        on|plus) printf 'on\n' ;;
+        off) printf 'off\n' ;;
+        *) printf 'unknown\n' ;;
+    esac
 }
 
-trace_is_warp() {
-    grep -Eq '^warp=(on|plus)$'
+v4="$(probe_family 4)"
+v6="$(probe_family 6)"
+if (( QUIET == 0 )); then
+    printf 'IPv4=%s IPv6=%s\n' "${v4}" "${v6}"
+fi
+if [[ "${v4}" == 'on' && "${v6}" == 'on' ]]; then
+    exit 0
+fi
+if [[ "${v4}" == 'off' || "${v6}" == 'off' ]]; then
+    exit 2
+fi
+exit 3
+HEALTH_EOF
+    chmod 0755 "${HEALTH_PROBE}"
 }
 
-warp_is_healthy() {
-    local trace
-    trace="$(trace_for_family 4 2>/dev/null || true)"
-    [[ -n "${trace}" ]] && trace_is_warp <<<"${trace}"
+install_managed_service_guard() {
+    local dropin_dir
+    dropin_dir="/etc/systemd/system/${WARP_MANAGED_SERVICE}.service.d"
+    install -d -m 0755 "${dropin_dir}"
+    cat > "${dropin_dir}/90-senyz-warp.conf" <<EOF
+[Unit]
+Wants=${ROUTE_UNIT} ${WARP_SERVICE}
+After=${ROUTE_UNIT} ${WARP_SERVICE}
+BindsTo=${WARP_SERVICE}
+
+[Service]
+ExecStartPre=${HEALTH_PROBE} --quiet
+EOF
+    systemctl daemon-reload
+}
+
+health_probe_status() {
+    if "${HEALTH_PROBE}" --quiet; then
+        return 0
+    else
+        return $?
+    fi
 }
 
 wait_for_warp() {
-    local attempt
-    for attempt in {1..12}; do
-        if warp_is_healthy; then
+    for _ in {1..18}; do
+        if warp_cli_connected && health_probe_status; then
             return 0
         fi
         sleep 5
@@ -346,100 +504,136 @@ wait_for_warp() {
     return 1
 }
 
-service_exists() {
-    systemctl list-unit-files "${MANAGED_SERVICE}.service" --no-legend 2>/dev/null | grep -q .
-}
-
 protect_managed_service() {
-    [[ "${FAIL_CLOSED}" == "1" ]] || return 0
-    if service_exists && systemctl is-active --quiet "${MANAGED_SERVICE}.service"; then
-        systemctl stop "${MANAGED_SERVICE}.service"
-        install -d -m 0700 "${STATE_DIR}"
-        touch "${WATCHDOG_MARKER}"
-        warn "WARP 未通过检查，已停止 ${MANAGED_SERVICE}，避免代理流量直接使用服务器出口。"
+    local should_run=0
+    install -d -m 0700 "${STATE_DIR}"
+    service_exists || return 0
+    if systemctl is-active --quiet "${WARP_MANAGED_SERVICE}.service" \
+        || systemctl is-enabled --quiet "${WARP_MANAGED_SERVICE}.service" \
+        || [[ -f "${DESIRED_MARKER}" ]]; then
+        should_run=1
     fi
+    if systemctl is-active --quiet "${WARP_MANAGED_SERVICE}.service"; then
+        systemctl stop "${WARP_MANAGED_SERVICE}.service"
+    fi
+    touch "${STOP_MARKER}"
+    chmod 0600 "${STOP_MARKER}"
+    if (( should_run == 1 )); then
+        touch "${DESIRED_MARKER}"
+        chmod 0600 "${DESIRED_MARKER}"
+    fi
+    warn "${WARP_MANAGED_SERVICE} is held stopped until WARP passes verification."
 }
 
 recover_managed_service() {
-    if [[ -f "${WATCHDOG_MARKER}" ]] && service_exists; then
-        systemctl start "${MANAGED_SERVICE}.service"
-        rm -f "${WATCHDOG_MARKER}"
-        log "WARP 已恢复，重新启动 ${MANAGED_SERVICE}。"
-    fi
+    [[ -f "${DESIRED_MARKER}" ]] || return 0
+    warp_cli_connected || die 'WARP CLI is not connected; the managed service remains stopped.'
+    health_probe_status || die 'WARP dual-stack trace is not healthy; the managed service remains stopped.'
+    systemctl start "${WARP_MANAGED_SERVICE}.service"
+    rm -f "${STOP_MARKER}" "${FAILURE_COUNT_FILE}"
+    log "WARP is verified; started ${WARP_MANAGED_SERVICE}."
 }
 
 install_watchdog() {
-    cat >"${WATCHDOG}" <<'WATCHDOG_EOF'
+    cat > "${WATCHDOG}" <<'WATCHDOG_EOF'
 #!/usr/bin/env bash
-set -uo pipefail
-
-SETTINGS_ENV="/etc/senyz-warp/settings.env"
-ROUTE_GUARD="/usr/local/sbin/senyz-warp-route-guard"
-STATE_DIR="/var/lib/senyz-warp"
-MARKER="${STATE_DIR}/managed-service-stopped"
-TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
-
-[[ -r "${SETTINGS_ENV}" ]] || exit 0
-# shellcheck disable=SC1090
-source "${SETTINGS_ENV}"
-mkdir -p "${STATE_DIR}" /run/lock
-exec 9>/run/lock/senyz-warp-watchdog.lock
-flock -n 9 || exit 0
-
-warp_cli() {
-    if warp-cli --help 2>&1 | grep -q -- '--accept-tos'; then
-        warp-cli --accept-tos "$@"
+set -uo pipefai…181 tokens truncated…then
+        LC_ALL=C warp-cli --accept-tos "$@"
     else
-        warp-cli "$@"
+        LC_ALL=C warp-cli "$@"
     fi
 }
 
-healthy() {
-    local trace
-    trace="$(curl -4 -fsS --connect-timeout 8 --max-time 15 "${TRACE_URL}" 2>/dev/null || true)"
-    grep -Eq '^warp=(on|plus)$' <<<"${trace}"
+cli_connected() {
+    local status
+    command -v warp-cli >/dev/null 2>&1 || return 1
+    systemctl is-active --quiet "${WARP_SERVICE}" || return 1
+    status="$(warp_cli status 2>&1 || true)"
+    grep -Eiq '(^|[^[:alpha:]])Connected([^[:alpha:]]|$)' <<<"${status}"
 }
 
 service_exists() {
-    systemctl list-unit-files "${MANAGED_SERVICE}.service" --no-legend 2>/dev/null | grep -q .
+    [[ "$(systemctl show -p LoadState --value "${WARP_MANAGED_SERVICE}.service" 2>/dev/null || true)" == 'loaded' ]]
 }
 
-if healthy; then
-    if [[ -f "${MARKER}" ]] && service_exists && systemctl start "${MANAGED_SERVICE}.service"; then
-        rm -f "${MARKER}"
-        logger -t senyz-warp "WARP recovered; started ${MANAGED_SERVICE}."
+protect() {
+    if service_exists && systemctl is-active --quiet "${WARP_MANAGED_SERVICE}.service"; then
+        systemctl stop "${WARP_MANAGED_SERVICE}.service"
+        touch "${STOP_MARKER}"
+        touch "${DESIRED_MARKER}"
+        chmod 0600 "${STOP_MARKER}" "${DESIRED_MARKER}"
     fi
-    exit 0
+}
+
+recover() {
+    local started=0
+    if [[ -f "${DESIRED_MARKER}" ]] && service_exists \
+        && cli_connected && "${HEALTH_PROBE}" --quiet; then
+        if ! systemctl is-active --quiet "${WARP_MANAGED_SERVICE}.service"; then
+            systemctl start "${WARP_MANAGED_SERVICE}.service" || return 1
+            started=1
+        fi
+        rm -f "${STOP_MARKER}" "${FAILURE_COUNT_FILE}"
+        if (( started == 1 )); then
+            logger -t senyz-warp "WARP recovered; started ${WARP_MANAGED_SERVICE}."
+        fi
+    fi
+}
+
+transient_count() {
+    local count=0
+    [[ -r "${FAILURE_COUNT_FILE}" ]] && read -r count < "${FAILURE_COUNT_FILE}"
+    [[ "${count}" =~ ^[0-9]+$ ]] || count=0
+    count=$((count + 1))
+    printf '%s\n' "${count}" > "${FAILURE_COUNT_FILE}"
+    chmod 0600 "${FAILURE_COUNT_FILE}"
+    printf '%s\n' "${count}"
+}
+
+if cli_connected; then
+    if "${HEALTH_PROBE}" --quiet; then
+        rm -f "${FAILURE_COUNT_FILE}"
+        recover
+        exit 0
+    else
+        probe_rc=$?
+    fi
+
+    if (( probe_rc == 3 )); then
+        count="$(transient_count)"
+        if (( count < WARP_TRANSIENT_LIMIT )); then
+            logger -t senyz-warp \
+                "WARP trace unavailable (${count}/${WARP_TRANSIENT_LIMIT}); service left unchanged."
+            exit 0
+        fi
+        logger -t senyz-warp 'WARP trace remained unavailable; entering fail-closed protection.'
+    else
+        logger -t senyz-warp 'WARP trace explicitly reported direct egress; entering fail-closed protection.'
+    fi
+else
+    logger -t senyz-warp 'WARP CLI is disconnected; entering fail-closed protection.'
 fi
 
+protect
 "${ROUTE_GUARD}" >/dev/null 2>&1 || true
-systemctl restart warp-svc.service >/dev/null 2>&1 || true
+systemctl restart "${WARP_SERVICE}" >/dev/null 2>&1 || true
 sleep 5
 warp_cli connect >/dev/null 2>&1 || true
-sleep 10
+sleep 15
 
-if healthy; then
-    if [[ -f "${MARKER}" ]] && service_exists && systemctl start "${MANAGED_SERVICE}.service"; then
-        rm -f "${MARKER}"
-    fi
-    logger -t senyz-warp "WARP recovered after reconnect."
+if cli_connected && "${HEALTH_PROBE}" --quiet; then
+    rm -f "${FAILURE_COUNT_FILE}"
+    recover
     exit 0
 fi
-
-if [[ "${FAIL_CLOSED:-1}" == "1" ]] && service_exists; then
-    if systemctl is-active --quiet "${MANAGED_SERVICE}.service"; then
-        systemctl stop "${MANAGED_SERVICE}.service"
-        touch "${MARKER}"
-    fi
-    logger -t senyz-warp "WARP health check failed; ${MANAGED_SERVICE} is stopped (fail-closed)."
-fi
+logger -t senyz-warp "WARP recovery failed; ${WARP_MANAGED_SERVICE} remains stopped."
 exit 1
 WATCHDOG_EOF
     chmod 0755 "${WATCHDOG}"
 
-    cat >"/etc/systemd/system/${WATCHDOG_UNIT}" <<EOF
+    cat > "/etc/systemd/system/${WATCHDOG_UNIT}" <<EOF
 [Unit]
-Description=Check Cloudflare WARP and protect the proxy exit
+Description=Verify Cloudflare WARP and protect proxy egress
 After=network-online.target ${WARP_SERVICE} ${ROUTE_UNIT}
 Wants=network-online.target
 
@@ -448,165 +642,315 @@ Type=oneshot
 ExecStart=${WATCHDOG}
 EOF
 
-    cat >"/etc/systemd/system/${WATCHDOG_TIMER}" <<EOF
+    cat > "/etc/systemd/system/${WATCHDOG_TIMER}" <<EOF
 [Unit]
 Description=Run the senyz WARP health check periodically
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=2min
-RandomizedDelaySec=15s
+OnBootSec=20s
+OnUnitActiveSec=30s
+RandomizedDelaySec=10s
 Persistent=true
 Unit=${WATCHDOG_UNIT}
 
 [Install]
 WantedBy=timers.target
 EOF
-
     systemctl daemon-reload
     systemctl enable "${WATCHDOG_TIMER}"
+}
+
+install_safety_rollback() {
+    cat > "${SAFETY_ROLLBACK}" <<'SAFETY_ROLLBACK_EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+
+SETTINGS_ENV="/etc/senyz-warp/settings.env"
+STATE_DIR="/var/lib/senyz-warp"
+COMPLETE_MARKER="${STATE_DIR}/install-complete"
+STOP_MARKER="${STATE_DIR}/managed-service-stopped"
+DESIRED_MARKER="${STATE_DIR}/managed-service-should-run"
+WATCHDOG_TIMER="senyz-warp-watchdog.timer"
+WARP_SERVICE="warp-svc.service"
+WARP_MANAGED_SERVICE="v2ray"
+
+[[ ! -f "${COMPLETE_MARKER}" ]] || exit 0
+if [[ -r "${SETTINGS_ENV}" ]]; then
+    # shellcheck disable=SC1090
+    . "${SETTINGS_ENV}"
+fi
+
+install -d -m 0700 "${STATE_DIR}"
+systemctl stop "${WARP_MANAGED_SERVICE}.service" >/dev/null 2>&1 || true
+touch "${STOP_MARKER}" "${DESIRED_MARKER}"
+chmod 0600 "${STOP_MARKER}" "${DESIRED_MARKER}"
+systemctl disable --now "${WATCHDOG_TIMER}" >/dev/null 2>&1 || true
+
+if command -v warp-cli >/dev/null 2>&1; then
+    if warp-cli --help 2>&1 | grep -q -- '--accept-tos'; then
+        timeout 20s warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+    else
+        timeout 20s warp-cli disconnect >/dev/null 2>&1 || true
+    fi
+fi
+systemctl disable --now "${WARP_SERVICE}" >/dev/null 2>&1 || true
+logger -t senyz-warp \
+    "Unverified WARP route transition rolled back; ${WARP_MANAGED_SERVICE} remains stopped."
+SAFETY_ROLLBACK_EOF
+    chmod 0755 "${SAFETY_ROLLBACK}"
+
+    cat > "/etc/systemd/system/${SAFETY_ROLLBACK_UNIT}" <<EOF
+[Unit]
+Description=Roll back an unverified Cloudflare WARP route transition
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=${SAFETY_ROLLBACK}
+EOF
+
+    cat > "/etc/systemd/system/${SAFETY_ROLLBACK_TIMER}" <<EOF
+[Unit]
+Description=Timed safety rollback for a Cloudflare WARP route transition
+
+[Timer]
+OnActiveSec=4min
+AccuracySec=1s
+Unit=${SAFETY_ROLLBACK_UNIT}
+EOF
+    systemctl daemon-reload
+}
+
+arm_safety_rollback() {
+    systemctl stop "${SAFETY_ROLLBACK_TIMER}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${SAFETY_ROLLBACK_UNIT}" >/dev/null 2>&1 || true
+    systemctl start "${SAFETY_ROLLBACK_TIMER}"
+    log 'A four-minute local safety rollback is armed for the route transition.'
+}
+
+cancel_safety_rollback() {
+    systemctl stop "${SAFETY_ROLLBACK_TIMER}" >/dev/null 2>&1 || true
+}
+
+trigger_safety_rollback() {
+    systemctl stop "${SAFETY_ROLLBACK_TIMER}" >/dev/null 2>&1 || true
+    systemctl start "${SAFETY_ROLLBACK_UNIT}" >/dev/null 2>&1 || true
 }
 
 enable_watchdog() {
     systemctl enable --now "${WATCHDOG_TIMER}"
 }
 
-print_trace() {
-    local family="$1"
-    local label="$2"
-    local trace warp ip_address location
-
-    trace="$(trace_for_family "${family}" 2>/dev/null || true)"
-    if [[ -z "${trace}" ]]; then
-        printf '%-5s unavailable\n' "${label}:"
+show_health() {
+    local probe_output probe_rc
+    if [[ ! -x "${HEALTH_PROBE}" ]]; then
+        printf 'dual-stack trace: not installed\n'
         return 0
     fi
-    warp="$(awk -F= '$1 == "warp" { print $2 }' <<<"${trace}")"
-    ip_address="$(awk -F= '$1 == "ip" { print $2 }' <<<"${trace}")"
-    location="$(awk -F= '$1 == "loc" { print $2 }' <<<"${trace}")"
-    printf '%-5s warp=%s ip=%s loc=%s\n' "${label}:" "${warp:-unknown}" "${ip_address:-unknown}" "${location:-unknown}"
+    if probe_output="$("${HEALTH_PROBE}" 2>&1)"; then
+        probe_rc=0
+    else
+        probe_rc=$?
+    fi
+    printf 'dual-stack trace: %s (class=%s)\n' "${probe_output:-unavailable}" "${probe_rc}"
 }
 
 do_status() {
     local package_version
     require_root status
     load_settings
+    validate_settings
+
     printf 'senyz-warp script: %s\n' "${SCRIPT_VERSION}"
     package_version="$(dpkg-query -W -f='${Version}' cloudflare-warp 2>/dev/null || true)"
     printf 'cloudflare-warp: %s\n' "${package_version:-not installed}"
+    printf 'managed service: %s\n' "${WARP_MANAGED_SERVICE}"
+    printf 'protocol: %s\n' "${WARP_PROTOCOL}"
+    printf 'transient limit: %s\n' "${WARP_TRANSIENT_LIMIT}"
     printf '\n=== warp-cli ===\n'
-    warp_cli status 2>&1 || true
-    printf '\n=== trace ===\n'
-    print_trace 4 IPv4
-    print_trace 6 IPv6
-    printf '\n=== protection ===\n'
-    printf 'route-guard: %s\n' "$(systemctl is-active "${ROUTE_UNIT}" 2>/dev/null || true)"
-    printf 'watchdog:    %s\n' "$(systemctl is-active "${WATCHDOG_TIMER}" 2>/dev/null || true)"
-    printf '%s:      %s\n' "${MANAGED_SERVICE}" "$(systemctl is-active "${MANAGED_SERVICE}.service" 2>/dev/null || true)"
-    if [[ -r "${ROUTE_ENV}" ]]; then
-        # shellcheck disable=SC1090
-        source "${ROUTE_ENV}"
-        ip -4 rule show | awk -v key="${RULE_PRIORITY}:" '$1 == key'
-        ip -6 rule show | awk -v key="${RULE_PRIORITY}:" '$1 == key'
+    if command -v warp-cli >/dev/null 2>&1; then
+        warp_cli status 2>&1 || true
+    else
+        printf 'not installed\n'
     fi
+    printf '\n=== egress ===\n'
+    show_health
+    printf '\n=== protection ===\n'
+    printf 'route guard: %s\n' "$(systemctl is-active "${ROUTE_UNIT}" 2>/dev/null || true)"
+    printf 'watchdog:    %s\n' "$(systemctl is-active "${WATCHDOG_TIMER}" 2>/dev/null || true)"
+    printf 'route rollback timer: %s\n' \
+        "$(systemctl is-active "${SAFETY_ROLLBACK_TIMER}" 2>/dev/null || true)"
+    printf '%-12s %s\n' "${WARP_MANAGED_SERVICE}:" \
+        "$(systemctl is-active "${WARP_MANAGED_SERVICE}.service" 2>/dev/null || true)"
+    if [[ -f "${STOP_MARKER}" ]]; then
+        printf 'fail-closed marker: present\n'
+    else
+        printf 'fail-closed marker: absent\n'
+    fi
+    if [[ -f "${DESIRED_MARKER}" ]]; then
+        printf 'managed-service intent: running\n'
+    else
+        printf 'managed-service intent: unchanged\n'
+    fi
+    if [[ -f "${INSTALL_COMPLETE_MARKER}" ]]; then
+        printf 'installation state: complete\n'
+    elif [[ -f "${INSTALL_STAGED_MARKER}" ]]; then
+        printf 'installation state: protected and incomplete; use the guided continuation\n'
+    else
+        printf 'installation state: not recorded\n'
+    fi
+}
+
+prepare_existing_install() {
+    require_supported_system
+    load_settings
+    validate_settings
+    service_exists || die "Service ${WARP_MANAGED_SERVICE}.service does not exist."
+    [[ -r "${SETTINGS_ENV}" && -r "${ROUTE_ENV}" ]] \
+        || die 'This server does not contain a managed senyz WARP installation.'
 }
 
 connect_warp() {
     require_root connect
-    require_supported_system
-    load_settings
-    validate_settings
-    [[ -x "${ROUTE_GUARD}" && -r "${ROUTE_ENV}" ]] || die "尚未安装，请先运行 ./warp.sh install。"
+    prepare_existing_install
+    confirm "This stops ${WARP_MANAGED_SERVICE} until WARP IPv4 and IPv6 are verified."
+    mark_install_staged
+    protect_managed_service
     write_settings
-
+    ensure_registration
+    install_safety_rollback
+    arm_safety_rollback
     configure_warp
-    warp_cli connect
+    if ! warp_cli connect; then
+        trigger_safety_rollback
+        die 'WARP connect failed; the route was rolled back and the managed service remains stopped.'
+    fi
     enable_watchdog
     if wait_for_warp; then
+        cancel_safety_rollback
         recover_managed_service
-        log "WARP 已连接。"
+        mark_install_complete
+        log 'WARP is connected and dual-stack egress is verified.'
         do_status
     else
-        protect_managed_service
-        die "WARP 在 60 秒内未通过检查；定时器会继续尝试恢复。"
+        trigger_safety_rollback
+        die "WARP did not pass verification; ${WARP_MANAGED_SERVICE} remains protected."
     fi
 }
 
 repair_warp() {
     require_root repair
-    require_supported_system
-    [[ -x "${ROUTE_GUARD}" && -r "${SETTINGS_ENV}" ]] || die "尚未安装，请先运行 ./warp.sh install。"
-    load_settings
-    validate_settings
-    write_settings
-
-    systemctl restart "${ROUTE_UNIT}"
+    prepare_existing_install
+    confirm "This stops ${WARP_MANAGED_SERVICE}, repairs WARP, and restores it only after verification."
+    mark_install_staged
+    protect_managed_service
+    install_dependencies
+    install_route_guard
+    install_cloudflare_client
+    ensure_registration
+    install_health_probe
+    install_managed_service_guard
+    install_watchdog
+    install_safety_rollback
+    arm_safety_rollback
+    configure_warp
     systemctl restart "${WARP_SERVICE}"
     sleep 3
-    configure_warp
-    warp_cli connect
+    if ! warp_cli connect; then
+        trigger_safety_rollback
+        die 'WARP repair could not connect; the route was rolled back.'
+    fi
     enable_watchdog
     if wait_for_warp; then
+        cancel_safety_rollback
         recover_managed_service
-        log "修复完成，WARP 已恢复。"
+        mark_install_complete
+        log 'WARP repair passed.'
         do_status
     else
-        protect_managed_service
-        die "修复后仍未通过 WARP 检查。请运行 ./warp.sh logs 查看记录。"
+        trigger_safety_rollback
+        die "WARP repair did not pass verification; ${WARP_MANAGED_SERVICE} remains protected."
     fi
 }
 
 disconnect_warp() {
     require_root disconnect
-    load_settings
-    validate_settings
-    confirm "断开后将停止自动恢复；在 fail-closed 模式下也会停止 ${MANAGED_SERVICE}。"
+    prepare_existing_install
+    confirm "This disconnects WARP and stops ${WARP_MANAGED_SERVICE} to prevent direct egress."
     systemctl disable --now "${WATCHDOG_TIMER}" 2>/dev/null || true
+    mark_install_staged
     protect_managed_service
     warp_cli disconnect || true
-    log "WARP 已断开。运行 ./warp.sh connect 可恢复。"
+    log "WARP is disconnected; ${WARP_MANAGED_SERVICE} remains stopped."
 }
 
 update_warp() {
     require_root update
-    require_supported_system
-    load_settings
-    validate_settings
-    write_settings
+    prepare_existing_install
+    confirm "This stops ${WARP_MANAGED_SERVICE}, updates Cloudflare WARP, and verifies egress."
+    mark_install_staged
+    protect_managed_service
     install_dependencies
     install_cloudflare_client
-    repair_warp
+    ensure_registration
+    install_safety_rollback
+    arm_safety_rollback
+    configure_warp
+    if ! warp_cli connect; then
+        trigger_safety_rollback
+        die 'WARP update could not connect; the route was rolled back.'
+    fi
+    enable_watchdog
+    if wait_for_warp; then
+        cancel_safety_rollback
+        recover_managed_service
+        mark_install_complete
+        log 'WARP update passed.'
+        do_status
+    else
+        trigger_safety_rollback
+        die "WARP update did not pass verification; ${WARP_MANAGED_SERVICE} remains protected."
+    fi
 }
 
 remove_route_rules() {
     [[ -r "${ROUTE_ENV}" ]] || return 0
     # shellcheck disable=SC1090
-    source "${ROUTE_ENV}"
+    . "${ROUTE_ENV}"
     if [[ -n "${IPV4_SOURCE:-}" ]]; then
-        ip -4 rule del pref "${RULE_PRIORITY}" from "${IPV4_SOURCE}/32" lookup main 2>/dev/null || true
+        ip -4 rule del pref "${RULE_PRIORITY}" from "${IPV4_SOURCE}/32" lookup main \
+            2>/dev/null || true
     fi
     if [[ -n "${IPV6_SOURCE:-}" ]]; then
-        ip -6 rule del pref "${RULE_PRIORITY}" from "${IPV6_SOURCE}/128" lookup main 2>/dev/null || true
+        ip -6 rule del pref "${RULE_PRIORITY}" from "${IPV6_SOURCE}/128" lookup main \
+            2>/dev/null || true
     fi
 }
 
 uninstall_warp() {
+    local dropin_dir
     require_root uninstall
-    load_settings
-    validate_settings
-    confirm "这会移除 Cloudflare WARP 和本脚本创建的服务。${MANAGED_SERVICE} 将保持停止，不会自动改走服务器原始出口。"
+    prepare_existing_install
+    confirm "This removes WARP and leaves ${WARP_MANAGED_SERVICE} disabled and stopped."
 
-    systemctl disable --now "${WATCHDOG_TIMER}" 2>/dev/null || true
     protect_managed_service
+    systemctl disable --now "${WARP_MANAGED_SERVICE}.service" 2>/dev/null || true
+    systemctl disable --now "${WATCHDOG_TIMER}" 2>/dev/null || true
+    systemctl stop "${SAFETY_ROLLBACK_TIMER}" 2>/dev/null || true
     warp_cli disconnect >/dev/null 2>&1 || true
     warp_cli registration delete >/dev/null 2>&1 || true
     systemctl disable --now "${ROUTE_UNIT}" 2>/dev/null || true
     remove_route_rules
 
-    rm -f "/etc/systemd/system/${WATCHDOG_TIMER}" \
+    dropin_dir="/etc/systemd/system/${WARP_MANAGED_SERVICE}.service.d"
+    rm -f "${dropin_dir}/90-senyz-warp.conf" \
+        "/etc/systemd/system/${WATCHDOG_TIMER}" \
         "/etc/systemd/system/${WATCHDOG_UNIT}" \
         "/etc/systemd/system/${ROUTE_UNIT}" \
-        "${WATCHDOG}" "${ROUTE_GUARD}"
+        "/etc/systemd/system/${SAFETY_ROLLBACK_TIMER}" \
+        "/etc/systemd/system/${SAFETY_ROLLBACK_UNIT}" \
+        "${WATCHDOG}" "${HEALTH_PROBE}" "${ROUTE_GUARD}" "${SAFETY_ROLLBACK}"
+    rmdir "${dropin_dir}" 2>/dev/null || true
     rm -rf "${CONFIG_DIR}" "${STATE_DIR}"
     systemctl daemon-reload
 
@@ -614,38 +958,77 @@ uninstall_warp() {
     apt-get remove --purge -y cloudflare-warp || true
     rm -f /etc/apt/sources.list.d/cloudflare-client.list \
         /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    log "卸载完成。${MANAGED_SERVICE} 未自动启动。"
+    log "WARP was removed. ${WARP_MANAGED_SERVICE} remains disabled and stopped."
 }
 
 show_logs() {
     require_root logs
-    journalctl -u "${WARP_SERVICE}" -u "${WATCHDOG_UNIT}" --since "24 hours ago" --no-pager -n 200
+    journalctl -u "${WARP_SERVICE}" -u "${WATCHDOG_UNIT}" \
+        --since '24 hours ago' --no-pager -n 250
 }
 
 do_install() {
+    local registration_rc
+
     require_root install
     require_supported_system
+    load_settings
     validate_settings
-    refuse_legacy_install
-    confirm "将安装 Cloudflare 官方 WARP 客户端并切换服务器出站路由。脚本会先创建 SSH 管理路由保护。"
+    service_exists || die "Service ${WARP_MANAGED_SERVICE}.service does not exist."
+    legacy_wgcf_present \
+        && die 'A legacy wgcf/WireGuard deployment is present. Use this only after a clean reinstall.'
+    [[ ! -f "${INSTALL_COMPLETE_MARKER}" ]] \
+        || die 'The managed WARP installation is already complete; use status or repair.'
+    if [[ -r "${SETTINGS_ENV}" && ! -r "${ROUTE_ENV}" ]]; then
+        die 'WARP settings exist without route metadata; stop and review this incomplete state.'
+    fi
+    if dpkg-query -W cloudflare-warp >/dev/null 2>&1 \
+        && [[ ! -f "${INSTALL_STAGED_MARKER}" ]] \
+        && [[ ! -r "${SETTINGS_ENV}" ]] \
+        && [[ ! -r "${ROUTE_ENV}" ]]; then
+        die 'An unmanaged Cloudflare WARP package is already installed.'
+    fi
+    confirm "This installs official Cloudflare WARP. ${WARP_MANAGED_SERVICE} remains stopped until dual-stack WARP passes verification; a timed local rollback protects the route transition."
 
+    mark_install_staged
+    protect_managed_service
+    install_staging_service_guard
     install_dependencies
-    [[ -s "${ROUTE_ENV}" ]] || capture_management_route
-    write_settings
-    install_route_guard
     install_cloudflare_client
+    if ensure_registration; then
+        :
+    else
+        registration_rc=$?
+        return "${registration_rc}"
+    fi
+    if [[ ! -r "${ROUTE_ENV}" ]]; then
+        capture_management_route
+    fi
+    if [[ ! -r "${SETTINGS_ENV}" ]]; then
+        write_settings
+    fi
+    install_route_guard
+    install_health_probe
+    install_managed_service_guard
     install_watchdog
+    install_safety_rollback
+    arm_safety_rollback
     configure_warp
-    warp_cli connect
+    if ! warp_cli connect; then
+        trigger_safety_rollback
+        die 'WARP could not connect; the route was rolled back and the managed service remains stopped.'
+    fi
     enable_watchdog
 
     if wait_for_warp; then
+        cancel_safety_rollback
         recover_managed_service
-        log "安装完成。"
+        mark_install_complete
+        log 'WARP installation passed; dual-stack egress is active.'
         do_status
     else
-        protect_managed_service
-        die "安装完成但 WARP 未通过检查；${MANAGED_SERVICE} 已按设置保护，定时器会继续重试。"
+        trigger_safety_rollback
+        die "WARP did not pass dual-stack verification; ${WARP_MANAGED_SERVICE} remains protected."
     fi
 }
 
@@ -653,22 +1036,27 @@ show_help() {
     cat <<EOF
 senyz warp.sh ${SCRIPT_VERSION}
 
-用法：
-  ./warp.sh install [--yes]     首次安装（建议仅用于干净的 Debian 12/13）
-  ./warp.sh status              查看 WARP、IPv4/IPv6、路由保护和 V2Ray 状态
-  ./warp.sh repair              重启服务并重新连接
-  ./warp.sh connect             连接并恢复自动健康检查
-  ./warp.sh disconnect [--yes]  安全断开；默认同时保护性停止 V2Ray
-  ./warp.sh update              从 Cloudflare 官方源更新并修复
-  ./warp.sh logs                查看最近 24 小时日志
-  ./warp.sh uninstall [--yes]   移除本脚本和 Cloudflare WARP
-  ./warp.sh version             显示脚本版本
+Usage:
+  ./warp.sh install [--yes]     Install or safely resume official WARP setup
+  ./warp.sh status              Read-only service and dual-stack egress status
+  ./warp.sh repair [--yes]      Repair WARP with fail-closed service protection
+  ./warp.sh connect [--yes]     Connect and restore the managed service after checks
+  ./warp.sh disconnect [--yes]  Disconnect and keep the managed service stopped
+  ./warp.sh update [--yes]      Update from Cloudflare's official repository
+  ./warp.sh logs                Show the latest WARP and watchdog logs
+  ./warp.sh uninstall [--yes]   Remove WARP; leave the managed service disabled
+  ./warp.sh version             Print the script version
 
-可选环境变量：
-  MANAGED_SERVICE=v2ray         WARP 失效时需要停止的服务
-  FAIL_CLOSED=1                 1=失效保护（默认），0=不停止代理服务
-  WARP_PROTOCOL=MASQUE          MASQUE（默认）或 WireGuard
-  CLOUDFLARE_WARP_VERSION=...   安装官方仓库中的指定版本
+Optional environment variables:
+  WARP_MANAGED_SERVICE=v2ray    Service protected from direct egress (default: v2ray)
+  WARP_PROTOCOL=MASQUE          MASQUE (default) or WireGuard
+  WARP_TRANSIENT_LIMIT=3        Consecutive trace timeouts before fail-closed (2-10)
+  CLOUDFLARE_WARP_VERSION=...   Exact package version available in the official repo
+
+No Cloudflare API token, account key, or DNS credential is used.
+Registration uses three controlled attempts with increasing delays. If Cloudflare
+is still temporarily limiting registration, the proxy stays stopped and the
+guided continuation command can safely resume later.
 EOF
 }
 
@@ -676,10 +1064,10 @@ main() {
     local command="${1:-help}"
     shift || true
 
-    while [[ "$#" -gt 0 ]]; do
+    while (( $# > 0 )); do
         case "$1" in
             --yes) ASSUME_YES=1 ;;
-            *) die "未知参数：$1" ;;
+            *) die "Unknown option: $1" ;;
         esac
         shift
     done
@@ -695,7 +1083,7 @@ main() {
         uninstall) uninstall_warp ;;
         version) printf '%s\n' "${SCRIPT_VERSION}" ;;
         help|-h|--help) show_help ;;
-        *) show_help; die "未知命令：${command}" ;;
+        *) show_help; die "Unknown command: ${command}" ;;
     esac
 }
 
