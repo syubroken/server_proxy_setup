@@ -7,11 +7,15 @@ set -uo pipefail
 umask 077
 export LC_ALL=C
 
-SCRIPT_VERSION="3.0.0-rc1"
+SCRIPT_VERSION="3.0.0-rc2"
 STATE_ENV="/etc/senyz-proxy/deployment.env"
 SITE_FILE="/etc/nginx/sites-available/senyz-proxy"
 CLIENT_FILE="/root/senyz-client.txt"
 REQUIRE_WARP=0
+RESUME_WARP=0
+WARP_STAGED_MARKER="/var/lib/senyz-warp/install-staged"
+WARP_COMPLETE_MARKER="/var/lib/senyz-warp/install-complete"
+WARP_STOP_MARKER="/var/lib/senyz-warp/managed-service-stopped"
 PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
@@ -59,17 +63,20 @@ private_mode() {
 usage() {
     cat <<'EOF'
 Usage:
-  senyz-verify-rebuild [--require-warp]
+  senyz-verify-rebuild [--require-warp] [--resume-warp]
 
 The default accepts a healthy base deployment without WARP. Add --require-warp
 after the WARP phase to require official WARP, its watchdog, and dual-stack
 Cloudflare trace verification.
+The guided installer uses --resume-warp only while continuing an incomplete,
+recorded WARP stage.
 EOF
 }
 
 while (( $# > 0 )); do
     case "$1" in
         --require-warp) REQUIRE_WARP=1 ;;
+        --resume-warp) RESUME_WARP=1 ;;
         -h|--help) usage; exit 0 ;;
         *) printf '[ERROR] Unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
@@ -115,7 +122,20 @@ done
 
 service_active ssh 'SSH'
 service_active nginx 'Nginx'
-service_active v2ray 'V2Ray'
+protected_resume=0
+if (( RESUME_WARP == 1 )) \
+    && [[ -f "${WARP_STAGED_MARKER}" ]] \
+    && [[ -f "${WARP_STOP_MARKER}" ]] \
+    && [[ ! -f "${WARP_COMPLETE_MARKER}" ]]; then
+    protected_resume=1
+fi
+if (( protected_resume == 1 )) && systemctl is-active --quiet v2ray; then
+    fail 'V2Ray is active despite a recorded WARP fail-closed stop marker.'
+elif (( protected_resume == 1 )); then
+    warn 'V2Ray is stopped by the recorded WARP fail-closed stage; the installer may resume it.'
+else
+    service_active v2ray 'V2Ray'
+fi
 
 if nginx -t >/dev/null 2>&1; then
     pass 'Nginx configuration syntax is valid.'
@@ -166,6 +186,8 @@ listeners="$(ss -H -lnt 2>/dev/null || true)"
 v2ray_listeners="$(awk '$4 ~ /:10001$/ {print $4}' <<<"${listeners}")"
 if [[ "${v2ray_listeners}" == '127.0.0.1:10001' ]]; then
     pass 'V2Ray listens only on 127.0.0.1:10001.'
+elif (( protected_resume == 1 )) && [[ -z "${v2ray_listeners}" ]]; then
+    warn 'V2Ray port 10001 is absent while the recorded WARP fail-closed stage is active.'
 else
     fail 'V2Ray port 10001 is missing or exposed on an unexpected address.'
 fi
@@ -256,6 +278,25 @@ if [[ -e /etc/wireguard/wgcf.conf ]] \
     fail 'Legacy wgcf/WireGuard was detected on a clean rebuild.'
 fi
 
+warp_staged=0
+warp_complete=0
+[[ -f "${WARP_STAGED_MARKER}" ]] && warp_staged=1
+[[ -f "${WARP_COMPLETE_MARKER}" ]] && warp_complete=1
+
+if (( RESUME_WARP == 1 && warp_staged == 1 && warp_complete == 0 )); then
+    private_mode "${WARP_STAGED_MARKER}" 'WARP staged-state marker'
+    if dpkg-query -W cloudflare-warp >/dev/null 2>&1; then
+        pass 'The official cloudflare-warp package is staged for continuation.'
+    else
+        warn 'The WARP package is not installed yet; the guided installer may continue the staged step.'
+    fi
+    if [[ -f "${WARP_STOP_MARKER}" ]]; then
+        warn 'The managed proxy is in recorded fail-closed protection until WARP continuation succeeds.'
+    else
+        pass 'No WARP fail-closed stop marker is present.'
+    fi
+    warn 'Final WARP route, watchdog, and dual-stack checks are deferred until continuation completes.'
+else
 warp_present=0
 if [[ -r /etc/senyz-warp/settings.env ]] \
     || dpkg-query -W cloudflare-warp >/dev/null 2>&1; then
@@ -273,6 +314,13 @@ else
         pass 'The official cloudflare-warp package is installed.'
     else
         fail 'WARP settings exist but the official package is missing.'
+    fi
+    if [[ -f "${WARP_COMPLETE_MARKER}" ]]; then
+        private_mode "${WARP_COMPLETE_MARKER}" 'WARP completion marker'
+    elif (( REQUIRE_WARP == 1 )); then
+        fail 'The WARP installation has not recorded successful completion.'
+    else
+        warn 'The WARP installation has not recorded successful completion.'
     fi
     service_active warp-svc 'Cloudflare WARP service'
     service_active senyz-warp-route-guard 'WARP management-route guard'
@@ -336,6 +384,7 @@ else
     else
         fail 'WARP settings are missing.'
     fi
+fi
 fi
 
 printf '\nSummary: PASS=%s WARN=%s FAIL=%s\n' \
