@@ -57,6 +57,7 @@ def kernel():
     run(['ip', 'link', 'set', 'lo', 'up'])
     run(['ip', 'netns', 'add', 'sps-ci-peer'])
     servers = []
+    persistent = None
     try:
         run(['ip', 'link', 'add', 'spswan', 'type', 'veth', 'peer', 'name', 'spspeer'])
         run(['ip', 'link', 'set', 'spspeer', 'netns', 'sps-ci-peer'])
@@ -92,14 +93,40 @@ def kernel():
         run(['ip', 'link', 'set', app.WARP_IF, 'up'])
         for addr in ('198.51.100.2', '[2001:db8:1::2]'):
             assert request(addr, True) == 0, 'Simulated tunnel interface did not allow protected UID'
+        echo = ('import socket; s=socket.socket(); s.bind(("198.51.100.2",18081)); s.listen(); '
+                'c,_=s.accept(); c.sendall(c.recv(1)); c.sendall(c.recv(1))')
+        servers.append(subprocess.Popen(peer + ['python3', '-c', echo],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        time.sleep(0.5)
+        client = '''import socket,sys
+s=socket.create_connection(('198.51.100.2',18081),timeout=2)
+s.sendall(b'a')
+assert s.recv(1)==b'a'
+print('established',flush=True)
+sys.stdin.readline()
+try:
+    s.sendall(b'b')
+    reply=s.recv(1)
+except OSError:
+    sys.exit(0)
+sys.exit(7 if reply==b'b' else 0)
+'''
+        persistent = subprocess.Popen(['runuser', '-u', 'nobody', '--', 'python3', '-c', client],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert persistent.stdout.readline().strip() == 'established', 'Long-connection positive control failed'
         run(['ip', 'link', 'set', app.WARP_IF, 'down'])
         run(['ip', 'link', 'set', app.WARP_IF, 'name', 'spswan'])
         run(['ip', 'link', 'set', 'spswan', 'up'])
+        persistent.communicate('\n', timeout=8)
+        assert persistent.returncode == 0, 'Established connection escaped after tunnel disappeared'
         for addr in ('198.51.100.2', '[2001:db8:1::2]'):
             assert request(addr, True) != 0, 'Business UID escaped after tunnel name disappeared'
             assert request(addr, False) == 0, 'Management must remain available'
         print('Isolated nftables IPv4/IPv6 UID and interface rules: PASS (simulated tunnel only)')
     finally:
+        if persistent is not None and persistent.poll() is None:
+            persistent.kill()
+            persistent.wait(timeout=5)
         for process in servers:
             process.terminate()
             process.wait(timeout=5)

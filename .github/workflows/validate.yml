@@ -12,7 +12,8 @@ jobs:
     timeout-minutes: 15
     container:
       image: debian:13
-      options: --cap-add NET_ADMIN --cap-add SYS_ADMIN
+      # Only the disposable CI container needs namespace/mount capabilities.
+      options: --cap-add NET_ADMIN --cap-add SYS_ADMIN --security-opt apparmor=unconfined
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install validation tools only

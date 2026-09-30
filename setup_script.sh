@@ -1002,7 +1002,7 @@ def start_http():
 def acme(home, args, timeout=240):
     # Direct invocation, not an unpinned self-install script or shell command string.
     return run(['/bin/bash', OPT / 'bin/acme.sh', '--home', home, '--config-home', home,
-                '--cert-home', home, *args], check=False, timeout=timeout)
+                '--cert-home', home, *args], check=False, timeout=timeout, env={'ACME_PACKAGED': '1'})
 
 
 def issue_certificate(staging):
@@ -1060,11 +1060,18 @@ def verify_served_certificate():
     pem = (ETC / 'fullchain.pem').read_text()
     first = pem[:pem.index('-----END CERTIFICATE-----') + len('-----END CERTIFICATE-----')]
     expected = ssl.PEM_cert_to_DER_cert(first)
-    with socket.create_connection(('127.0.0.1', 443), timeout=5) as raw:
-        with ssl.create_default_context().wrap_socket(raw, server_hostname=s['domain']) as tls:
-            if tls.getpeercert(binary_form=True) != expected:
-                raise Stop('Nginx 仍未提供磁盘上的新证书。')
-    return certificate_expiry()
+    # Nginx reload is asynchronous; old workers may accept a connection briefly.
+    for attempt in range(10):
+        try:
+            with socket.create_connection(('127.0.0.1', 443), timeout=3) as raw:
+                with ssl.create_default_context().wrap_socket(raw, server_hostname=s['domain']) as tls:
+                    if tls.getpeercert(binary_form=True) == expected:
+                        return certificate_expiry()
+        except (OSError, ssl.SSLError):
+            pass
+        if attempt < 9:
+            time.sleep(1)
+    raise Stop('Nginx 未通过新证书实际生效检查。')
 
 
 def renew_certificate():
@@ -1334,7 +1341,8 @@ def diagnostics():
     require_root()
     s = load(STATE)
     report = {k: s.get(k) for k in ('version', 'stage', 'ready', 'prepared', 'created', 'health_ok',
-                                  'health_at', 'health_failures', 'registration_blocked', 'recovery_errors', 'acceptance')}
+                                  'health_at', 'health_failures', 'registration_blocked', 'recovery_errors', 'acceptance',
+                                  'certificate_ok', 'certificate_checked_at', 'certificate_expires_at')}
     report['pending'] = PENDING.exists()
     report['disk_free_bytes'] = shutil.disk_usage('/').free
     report['reboot_required'] = Path('/var/run/reboot-required').exists()
