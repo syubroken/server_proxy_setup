@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+*.pem
+*.key
+*.crt
+*.zip
+*.bundle
+*client-trial*
+private.json
+state.json
+diagnostics.json
