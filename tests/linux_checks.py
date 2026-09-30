@@ -83,7 +83,10 @@ def kernel():
                     f'http://{addr}:18080/']
             if protected:
                 args = ['runuser', '-u', 'nobody', '--', *args]
-            return subprocess.run(args, capture_output=True).returncode
+            result = subprocess.run(args, capture_output=True, text=True)
+            if result.returncode:
+                print(f'test request {addr}, protected={protected}, rc={result.returncode}: {result.stderr.strip()}')
+            return result.returncode
 
         for addr in ('198.51.100.2', '[2001:db8:1::2]'):
             assert request(addr, False) == 0, 'Management positive control failed'
@@ -91,8 +94,12 @@ def kernel():
         run(['ip', 'link', 'set', 'spswan', 'down'])
         run(['ip', 'link', 'set', 'spswan', 'name', app.WARP_IF])
         run(['ip', 'link', 'set', app.WARP_IF, 'up'])
+        # Linux can remove IPv6 addresses on an administrative down/up cycle.
+        run(['ip', '-6', 'addr', 'replace', '2001:db8:1::1/64', 'dev', app.WARP_IF, 'nodad'])
+        run(peer + ['ip', '-6', 'addr', 'replace', '2001:db8:1::2/64', 'dev', 'spspeer', 'nodad'])
         for addr in ('198.51.100.2', '[2001:db8:1::2]'):
-            assert request(addr, True) == 0, 'Simulated tunnel interface did not allow protected UID'
+            assert request(addr, False) == 0, 'Simulated tunnel positive control failed: ' + addr
+            assert request(addr, True) == 0, 'Simulated tunnel interface did not allow protected UID: ' + addr
         echo = ('import socket; s=socket.socket(); s.bind(("198.51.100.2",18081)); s.listen(); '
                 'c,_=s.accept(); c.sendall(c.recv(1)); c.sendall(c.recv(1))')
         servers.append(subprocess.Popen(peer + ['python3', '-c', echo],
@@ -117,6 +124,8 @@ sys.exit(7 if reply==b'b' else 0)
         run(['ip', 'link', 'set', app.WARP_IF, 'down'])
         run(['ip', 'link', 'set', app.WARP_IF, 'name', 'spswan'])
         run(['ip', 'link', 'set', 'spswan', 'up'])
+        run(['ip', '-6', 'addr', 'replace', '2001:db8:1::1/64', 'dev', 'spswan', 'nodad'])
+        run(peer + ['ip', '-6', 'addr', 'replace', '2001:db8:1::2/64', 'dev', 'spspeer', 'nodad'])
         persistent.communicate('\n', timeout=8)
         assert persistent.returncode == 0, 'Established connection escaped after tunnel disappeared'
         for addr in ('198.51.100.2', '[2001:db8:1::2]'):
