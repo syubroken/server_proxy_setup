@@ -6,7 +6,18 @@
 
 ## 从哪里开始
 
-本仓库只有一个新版入口：[`setup_script.sh`](setup_script.sh)。脚本从 GitHub 下载到 VPS 后用 Bash 执行，内含 Python 标准库逻辑，不需要 pip。固定下载命令将在这轮自动检查通过后写入此处。
+本仓库只有一个新版入口：[`setup_script.sh`](setup_script.sh)。脚本从 GitHub 下载到 VPS 后用 Bash 执行，内含 Python 标准库逻辑，不需要 pip。
+
+下面是**选定干净测试 VPS 后**使用的试装入口，不是在当前已经运行代理的系统上执行。整段复制即可，固定版本与文件校验自动处理；没有通过校验就不会执行：
+
+```bash
+apt-get update && apt-get install -y ca-certificates curl && \
+curl --proto '=https' --tlsv1.2 -fsSLo /root/setup_script.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/12dbb25fd0f640a6c49d35a7b4ac3b8f63629fb2/setup_script.sh && \
+printf '%s  %s\n' '088fd756cf612733d0a704b522a29202dfa71481ea9428dc8dbd762dfa04155f' '/root/setup_script.sh' | sha256sum -c - && \
+bash /root/setup_script.sh
+```
+
+这份固定脚本通过了[Debian 13 自动检查](https://github.com/syubroken/server_proxy_setup/actions/runs/36750337606)，仍不等于真实 VPS 已经通过。域名、邮箱和 `TRIAL` 确认在脚本运行后输入。它不要求你操作 Git 或理解版本号。
 
 首次试装先选定测试机器和时间；你只需：
 

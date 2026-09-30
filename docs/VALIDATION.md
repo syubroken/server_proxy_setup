@@ -6,8 +6,8 @@
 
 - 35 项离线回归通过，包含注册限流、未知注册错误、拒绝自动重复注册、过期 SSH 证明、失败回退、取消标记、业务 DNS、禁止输出失败节点和续期失败状态。
 - Bash 语法及 ShellCheck warning 级别通过。
-- V2Ray 保留已校验的 VMess/WebSocket 配置结构；真实客户端另验。
-- GitHub Actions 在 Debian 13 容器中检查 Nginx、systemd 配置，并用独立网络命名空间验证 nftables IPv4/IPv6 的 UID 与接口约束。是否通过以对应提交的 Actions 结果为准。
+- 官方 V2Ray 5.53.0 Windows 二进制对本版本生成的服务器和探针配置均返回 Configuration OK；未启动代理连接。
+- [提交 12dbb25 的 GitHub Actions](https://github.com/syubroken/server_proxy_setup/actions/runs/36750337606) 已通过：Debian 13 容器内的回归、Nginx HTTP/TLS 与 systemd 配置校验，以及独立网络命名空间中的 nftables IPv4/IPv6 UID/接口约束。包含原生接口阻断、模拟隧道接口放行、接口改变后新连接和已建立 IPv4 连接阻断，以及管理流量正向对照。
 
 内核检查使用模拟接口名，不注册 WARP、不连接 VPS，也不证明官方守护进程的规则能与本项目共存。模拟/单元检查不能被写成真实 VPS、证书续期或客户端成功。
 
