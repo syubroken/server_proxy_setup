@@ -1,0 +1,33 @@
+name: Validate simple installer
+on:
+  push:
+    branches: [main, codex/simple-official-warp]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  debian13:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: debian:13
+      options: --cap-add NET_ADMIN --cap-add SYS_ADMIN
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install validation tools only
+        run: |
+          printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+          chmod 755 /usr/sbin/policy-rc.d
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y python3 bash shellcheck nginx openssl systemd nftables iproute2 curl util-linux
+      - name: Shell and offline regressions
+        run: |
+          bash -n setup_script.sh
+          shellcheck --severity=warning setup_script.sh
+          python3 tests/test_candidate.py
+          test "$(sha256sum legacy/setup_script_legacy.sh | cut -d ' ' -f 1)" = 074a16863da9460f5606e921123dfb1c4ae11b80c35c0121c19aa513879194a7
+      - name: Parse real Nginx and systemd configurations
+        run: python3 tests/linux_checks.py
+      - name: Exercise firewall in isolated network namespaces
+        run: SPS_ISOLATED_TEST=1 unshare --mount --net --propagation private python3 tests/linux_checks.py --kernel
