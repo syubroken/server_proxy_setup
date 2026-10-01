@@ -60,3 +60,13 @@ alpha2 分别打开终端读、写通道；不能使用 Python 的标准输入�
 已经更换 Token，不需要把新值发到聊天、脚本或 GitHub。如果此前暴露的是 Global API Key，仅轮换 API Token 不会撤销 Global API Key；应在 Cloudflare 中核对实际暴露的凭据类型，分别处理。
 
 旧脚本本身不安装 WARP；没有运行旧 WARP 命令，且没有其他 WARP 安装证据时，不能把恢复联网当作 WARP 验收。国内直连是客户端分流问题，与这里的服务器出口不同。
+
+## 已有 dns_cf 配置更换 Global API Key 后
+
+若实际域名配置为 `Le_Webroot='dns_cf'`，说明已使用 Cloudflare DNS 验证；这种模式不需要为验证停止 Nginx 腾出 80 端口，但确实需要有效的 Cloudflare 凭据。不能继续套用原始 standalone 流程的结论。
+
+现有证书不会因为 Cloudflare 凭据轮换立即失效。但如果续期仍使用已撤销的 Global API Key，以后 DNS 验证就会失败。Token 与 Global API Key 不可互相替代，也不要把新凭据贴到聊天、命令参数或公开配置中。
+
+维护工具 `tools/refresh_cf_global_key.py` 仅适用于 root 默认的 `/root/.acme.sh`、现有 ECC 证书及 `dns_cf` 配置。它在终端隐藏读取新 Global API Key，先向 `https://api.cloudflare.com` 发起一次只读 GET 认证并确认区域可见，再保存权限受限的备份并同步配置。不执行 ACME、不写 DNS 记录、不重启服务；发现 Token、自定义配置路径、并发配置改动或正在运行的 acme.sh 时会停止。认证失败时不更新凭据。
+
+这仅确认凭据读取与 Cloudflare 只读访问，不证明 DNS 编辑权限、证书部署 hook 或真实续期已通过。工具入口在 Linux 检查通过后补充。
