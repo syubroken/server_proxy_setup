@@ -2,7 +2,11 @@
 
 版本 4.0.0-alpha2，2026-10-01。这是试装候选，不是生产通过记录。
 
-alpha1 已在用户真实 VPS 上暴露首次终端输入失败；此前 35 项测试没有覆盖真实控制终端，不能用当时 CI 通过否认该缺陷。alpha2 修复 `/dev/tty` 读写方式，增加 6 项 Linux PTY 测试（包括实际 Bash/内嵌 Python 入口）。本次新增检查结果见下次发布更新；尚不能称为完整安装通过。
+alpha1 已在用户真实 VPS 上暴露首次终端输入失败；此前 35 项测试没有覆盖真实控制终端，不能用当时 CI 通过否认该缺陷。alpha2 修复 `/dev/tty` 读写方式，增加 6 项 Linux PTY 测试（包括实际 Bash/内嵌 Python 入口）。
+
+[alpha2 固定代码提交 4ed2ba2 的 CI](https://github.com/syubroken/server_proxy_setup/actions/runs/36864449181) 已全部通过：35 项回归、6 项 Linux PTY 测试、Bash/ShellCheck、Nginx/systemd 配置与隔离内核网络检查。PTY 中确实重现旧版 r+ 异常，并验证新入口、连续输入、取消和中断。没有执行真实 WARP 注册或真实 VPS 安装。
+
+固定安装脚本 SHA-256：`3334e985fb5f5fef64451e89c80056c834ef362871706400004ffac378a84c16`。只读诊断脚本 SHA-256：`bb852732274cdce93e22017ff8eff3732936cf57a6700b1ccec03c0048b38941`。诊断脚本已过 Bash/ShellCheck，不能代替真实服务器上的故障诊断结果。
 
 ## 已完成与自动检查
 
