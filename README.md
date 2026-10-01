@@ -2,7 +2,9 @@
 
 个人 Debian VPS 代理脚本。当前方向：**保留 V2Ray + VMess/WebSocket/TLS + Nginx，使用官方 WARP，修好证书自动续期。** 不需要 Zero Trust、Cloudflare API Key 或复杂菜单。
 
-**当前精简版 4.0.0-alpha1 是试装候选，还没有在真实干净 VPS 上完成验收。不要在正在使用的代理服务器上叠加执行。** 原始脚本原样保存在 [`legacy/`](legacy/README.md)。
+**当前精简版 4.0.0-alpha2 是试装候选，还没有在真实干净 VPS 上完成完整验收。不要在正在使用的代理服务器上叠加执行。** 历史脚本及其已知问题保留在 [`legacy/`](legacy/README.md)。
+
+alpha1 已因终端输入缺陷撤回：正常 SSH 会话也可能报“需要交互 SSH 终端”。不要再使用旧提交 `12dbb25` 的安装命令；alpha2 修复此问题。它发生在域名输入前，本身不要求重装系统。已经装回旧方案的服务器先保持现状。详见[故障处理](docs/TROUBLESHOOTING.md)。
 
 ## 从哪里开始
 
@@ -10,16 +12,19 @@
 
 首次测试使用独立的新 VPS 和测试子域名，保留现有代理继续使用。先确认供应商控制台可以进入服务器、自己的 SSH 公钥可以登录，再开始安装。下载命令在新 VPS 的 root SSH 会话中运行，不是在本地 Windows 中运行。
 
-下面是**选定干净测试 VPS 后**使用的试装入口，不是在当前已经运行代理的系统上执行。整段复制即可，固定版本与文件校验自动处理；没有通过校验就不会执行：
+下面的命令只在**已选定的干净 Debian 13 amd64 测试 VPS** 中运行。整段复制到 root SSH 会话即可；先核对文件摘要并预检，通过后才进入安装：
 
 ```bash
-apt-get update && apt-get install -y ca-certificates curl && \
-curl --proto '=https' --tlsv1.2 -fsSLo /root/setup_script.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/12dbb25fd0f640a6c49d35a7b4ac3b8f63629fb2/setup_script.sh && \
-printf '%s  %s\n' '088fd756cf612733d0a704b522a29202dfa71481ea9428dc8dbd762dfa04155f' '/root/setup_script.sh' | sha256sum -c - && \
+apt-get update && apt-get install -y ca-certificates curl python3 && \
+curl --proto '=https' --tlsv1.2 -fsSLo /root/setup_script.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/4ed2ba22f84076846fb3539427fc7b03aab114fd/setup_script.sh && \
+printf '%s  %s\n' '3334e985fb5f5fef64451e89c80056c834ef362871706400004ffac378a84c16' '/root/setup_script.sh' | sha256sum -c - && \
+bash /root/setup_script.sh check && \
 bash /root/setup_script.sh
 ```
 
-这份固定脚本通过了[Debian 13 自动检查](https://github.com/syubroken/server_proxy_setup/actions/runs/36750337606)，仍不等于真实 VPS 已经通过。域名、邮箱和 `TRIAL` 确认在脚本运行后输入。它不要求你操作 Git 或理解版本号。
+该固定版本已通过 [Debian 13 检查](https://github.com/syubroken/server_proxy_setup/actions/runs/36864449181)，包括 35 项回归和 6 项真实 Linux PTY 终端测试。它仍不等于真实 VPS 全流程通过。基础准备会安装/更新 python3、curl 和 ca-certificates；不需要 Cloudflare API 凭据。
+
+正常流程会依次询问代理域名、证书联系邮箱和 `TRIAL` 确认。切换 WARP 后按提示另开一次新的 SSH 登录，执行屏幕显示的 `confirm-ssh` 命令，原窗口会自动继续。不要关闭原窗口或复用原连接冒充新连接。服务器检查通过后才显示测试节点。
 
 首次试装先选定测试机器和时间；你只需：
 
@@ -56,6 +61,20 @@ bash /opt/senyz-proxy-simple/setup_script.sh status
 - **暂不自动升级后退回旧版本**：目前没有“自动安装新版、失败再自动降级”的功能。这与已有的安装期间网络超时恢复是两回事；网络恢复也仍需在真机上验证。
 
 先完成新 VPS 的真实验收，再按使用情况安排版本维护或添加通知，正常使用不需要每天登录管理。
+
+## 报错时怎么做
+
+保留当前 SSH 窗口和最后约 10 行输出，先查看[故障处理](docs/TROUBLESHOOTING.md)。不要重跑旧安装器、强制重签证书或反复删掉 WARP 注册。下面是**故障诊断入口，不是安装命令**；可用于已装旧方案或新版的服务器。它不重启、不安装、不改配置，不输出凭据，只显示简短状态并进行两次有超时限制的 Cloudflare HTTPS 检查：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSLo /root/proxy-diagnose.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/4ed2ba22f84076846fb3539427fc7b03aab114fd/tools/diagnose.sh && \
+printf '%s  %s\n' 'bb852732274cdce93e22017ff8eff3732936cf57a6700b1ccec03c0048b38941' '/root/proxy-diagnose.sh' | sha256sum -c - && \
+bash /root/proxy-diagnose.sh
+```
+
+首次会把诊断脚本保存在 `/root/proxy-diagnose.sh`；以后即使 GitHub 不可达，也可以执行 `bash /root/proxy-diagnose.sh`。它不会修复故障，也不能凭主机 WARP trace 证明完整代理出口合格。将摘要与报错前后约 10 行交给维护者，再决定最小修复步骤。
+
+新版不需要 Cloudflare API Key/Token。HTTP 证书验证不依赖这些凭据；把 Global API Key 写入 acme.sh 配置不能保证续期。如果此前暴露过 Global API Key，需要轮换该 Key，仅更换 API Token 不会撤销它。
 
 ## 当前不能承诺什么
 

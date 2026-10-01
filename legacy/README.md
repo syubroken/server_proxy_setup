@@ -1,6 +1,14 @@
 # 原始重装脚本
 
-`setup_script_legacy.sh` 保留原始内容和执行行为，SHA-256：
+`setup_script_legacy.sh` 是历史实现，**不要当作已经修复的一键恢复工具**。具体风险与失败后的安全处理见 [故障处理](../docs/TROUBLESHOOTING.md)。
+
+2026-10-01 本次修复开始时，远程提交 `75dd5de` 已把三个 `apt-get` 调用改为 `apt`。本次保留该已有改动，不改写旧脚本。当前文件 SHA-256：
+
+```text
+b235ccfa254437bf76f234d69e061100b43ef2fedeacb3b3ef4367ffabc13568
+```
+
+更早的原始字节仍保存在 Git 历史（如 `4a63f82`）和本地归档中，SHA-256：
 
 ```text
 074a16863da9460f5606e921123dfb1c4ae11b80c35c0121c19aa513879194a7
