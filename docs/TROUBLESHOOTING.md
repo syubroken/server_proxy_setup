@@ -60,3 +60,25 @@ alpha2 分别打开终端读、写通道；不能使用 Python 的标准输入�
 已经更换 Token，不需要把新值发到聊天、脚本或 GitHub。如果此前暴露的是 Global API Key，仅轮换 API Token 不会撤销 Global API Key；应在 Cloudflare 中核对实际暴露的凭据类型，分别处理。
 
 旧脚本本身不安装 WARP；没有运行旧 WARP 命令，且没有其他 WARP 安装证据时，不能把恢复联网当作 WARP 验收。国内直连是客户端分流问题，与这里的服务器出口不同。
+
+## 已有 dns_cf 配置更换 Global API Key 后
+
+若实际域名配置为 `Le_Webroot='dns_cf'`，说明已使用 Cloudflare DNS 验证；这种模式不需要为验证停止 Nginx 腾出 80 端口，但确实需要有效的 Cloudflare 凭据。不能继续套用原始 standalone 流程的结论。
+
+现有证书不会因为 Cloudflare 凭据轮换立即失效。但如果续期仍使用已撤销的 Global API Key，以后 DNS 验证就会失败。Token 与 Global API Key 不可互相替代，也不要把新凭据贴到聊天、命令参数或公开配置中。
+
+维护工具 `tools/refresh_cf_global_key.py` 仅适用于 root 默认的 `/root/.acme.sh`、现有 ECC 证书及 `dns_cf` 配置。它在终端隐藏读取新 Global API Key，先向 `https://api.cloudflare.com` 发起一次只读 GET 认证并确认区域可见，再保存权限受限的备份并同步配置。不执行 ACME、不写 DNS 记录、不重启服务；发现 Token、自定义配置路径、并发配置改动或正在运行的 acme.sh 时会停止。认证失败时不更新凭据。
+
+固定工具已通过 [Linux 检查](https://github.com/syubroken/server_proxy_setup/actions/runs/36868132186)：9 项行为检查和 1 项真实 PTY 隐藏输入检查，以及现有安装器检查。测试未使用真实凭据或调用真实 Cloudflare API。
+
+下面的修复命令需要替换最后两个参数为“证书域名”和“Cloudflare 区域名”；例如证书域名 `proxy.example.com` 属于区域 `example.com`。它会**修改服务器保存的续期凭据**，不是只读诊断；只在确认需要同步 Global API Key 时执行：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSLo /root/refresh-cf-key.py https://raw.githubusercontent.com/syubroken/server_proxy_setup/16a526cd5f7657504bdc084fe91f06773bca59e1/tools/refresh_cf_global_key.py && \
+printf '%s  %s\n' '48e63fb798eb092d9a53b9be1c7a412945239299d65e78ce4b91d4a715dc5859' '/root/refresh-cf-key.py' | sha256sum -c - && \
+python3 /root/refresh-cf-key.py proxy.example.com example.com
+```
+
+邮箱留空会沿用已有值；只有确定之前保存正确时才留空。新 Key 输入不会回显，不会进入命令参数。工具不收集私钥或节点链接。只需保留最终 PASS/停止提示，不要上传保密备份。
+
+PASS 仅确认凭据读取、文件更新和 Cloudflare 只读访问，不证明 DNS 编辑权限、证书部署 hook 或真实续期已通过。当前代理仍可使用时，不应为了核对凭据强制重签证书。
