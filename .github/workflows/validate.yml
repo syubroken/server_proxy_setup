@@ -25,9 +25,14 @@ jobs:
       - name: Shell and offline regressions
         run: |
           bash -n setup_script.sh
+          bash -n tools/diagnose.sh
           shellcheck --severity=warning setup_script.sh
+          shellcheck --severity=warning tools/diagnose.sh
           python3 tests/test_candidate.py
-          test "$(sha256sum legacy/setup_script_legacy.sh | cut -d ' ' -f 1)" = 074a16863da9460f5606e921123dfb1c4ae11b80c35c0121c19aa513879194a7
+          # Preserve the existing upstream legacy file at 75dd5de; no repairs here.
+          test "$(sha256sum legacy/setup_script_legacy.sh | cut -d ' ' -f 1)" = b235ccfa254437bf76f234d69e061100b43ef2fedeacb3b3ef4367ffabc13568
+      - name: Real Linux terminal and Bash entry checks
+        run: python3 tests/test_terminal.py
       - name: Parse real Nginx and systemd configurations
         run: python3 tests/linux_checks.py
       - name: Exercise firewall in isolated network namespaces

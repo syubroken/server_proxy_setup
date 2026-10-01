@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# senyz-proxy-simple 4.0.0-alpha1. Nginx + acme.sh + official consumer WARP. Trial only.
+# senyz-proxy-simple 4.0.0-alpha2. Nginx + acme.sh + official consumer WARP. Trial only.
 # The Bash entry embeds its Python standard-library runtime; no pip is used.
 set -euo pipefail
 set +x
@@ -52,7 +52,7 @@ import time
 import urllib.request
 import zipfile
 
-VERSION = '4.0.0-alpha1'
+VERSION = '4.0.0-alpha2'
 SELF = Path(sys.argv[1]).resolve()
 BASE = Path('/var/lib/senyz-proxy-simple')
 ETC = Path('/etc/senyz-proxy-simple')
@@ -198,15 +198,25 @@ def ssh_session_start():
 
 def prompt(label):
     try:
-        with open('/dev/tty', 'r+') as tty:
-            tty.write(label + '：')
-            tty.flush()
-            value = tty.readline()
+        # Buffered read/write mode (r+) requires seeking, which a Linux tty
+        # cannot do. stdin contains the embedded program, not operator input.
+        with open('/dev/tty', 'r', encoding='utf-8') as reader, \
+                open('/dev/tty', 'w', encoding='utf-8') as writer:
+            writer.write(label + '：')
+            writer.flush()
+            value = reader.readline()
             if not value:
                 raise Stop('输入已取消。')
-    except OSError:
-        raise Stop('需要交互 SSH 终端。') from None
+    except OSError as exc:
+        raise Stop('无法读写控制终端 /dev/tty（' + type(exc).__name__ +
+                   '）；请在带终端的 SSH 会话中运行，保留此错误供排查。') from None
     return value.strip()
+
+
+def terminal_check():
+    if prompt('只读终端检查，请输入 TERMINAL-OK') != 'TERMINAL-OK':
+        raise Stop('终端检查已取消；没有安装或修改服务器。')
+    say('PASS：终端交互正常；没有安装或修改服务器。')
 
 
 def validate_inputs(domain, email):
@@ -1376,7 +1386,9 @@ def repair():
 
 def main(args):
     command = args[0] if args else 'install'
-    if command == 'check':
+    if command == 'check-terminal':
+        terminal_check()
+    elif command == 'check':
         require_root()
         clean_check()
         say('只读预检通过；没有安装或修改服务器。')
@@ -1410,7 +1422,7 @@ def main(args):
     elif command == 'internal-cert-deploy':
         certificate_deploy()
     elif command in ('help', '--help', '-h'):
-        say('用法：bash setup_script.sh（全新测试机安装）；只读检查：check；状态：status。')
+        say('用法：bash setup_script.sh（全新测试机安装）；只读检查：check；终端检查：check-terminal；状态：status。')
         say('故障时保留输出交给维护者；不需要重新安装系统。')
     else:
         raise Stop('未知操作，未执行。')
@@ -1432,5 +1444,8 @@ if __name__ == '__main__':
                 safe_stop('operation-failed')
             except Exception:
                 say('自动恢复未全部完成；持久事务保留，定时器将继续尝试。请保留供应商救援入口。')
+        if not sys.argv[2:] or sys.argv[2] in ('install', 'trial-install', 'resume', 'repair'):
+            say('先保留 SSH 窗口和本段输出；不要重装、叠加旧脚本或反复注册/签发证书。')
+            say('故障处理：仓库 docs/TROUBLESHOOTING.md；本次停止不代表必须重装系统。')
         sys.exit(1)
 SWO_PYTHON

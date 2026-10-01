@@ -2,7 +2,9 @@
 
 个人 Debian VPS 代理脚本。当前方向：**保留 V2Ray + VMess/WebSocket/TLS + Nginx，使用官方 WARP，修好证书自动续期。** 不需要 Zero Trust、Cloudflare API Key 或复杂菜单。
 
-**当前精简版 4.0.0-alpha1 是试装候选，还没有在真实干净 VPS 上完成验收。不要在正在使用的代理服务器上叠加执行。** 原始脚本原样保存在 [`legacy/`](legacy/README.md)。
+**当前精简版 4.0.0-alpha2 是试装候选，还没有在真实干净 VPS 上完成完整验收。不要在正在使用的代理服务器上叠加执行。** 历史脚本及其已知问题保留在 [`legacy/`](legacy/README.md)。
+
+alpha1 已因终端输入缺陷撤回：正常 SSH 会话也可能报“需要交互 SSH 终端”。不要再使用旧提交 `12dbb25` 的安装命令；alpha2 修复此问题。它发生在域名输入前，本身不要求重装系统。已经装回旧方案的服务器先保持现状。详见[故障处理](docs/TROUBLESHOOTING.md)。
 
 ## 从哪里开始
 
@@ -10,16 +12,7 @@
 
 首次测试使用独立的新 VPS 和测试子域名，保留现有代理继续使用。先确认供应商控制台可以进入服务器、自己的 SSH 公钥可以登录，再开始安装。下载命令在新 VPS 的 root SSH 会话中运行，不是在本地 Windows 中运行。
 
-下面是**选定干净测试 VPS 后**使用的试装入口，不是在当前已经运行代理的系统上执行。整段复制即可，固定版本与文件校验自动处理；没有通过校验就不会执行：
-
-```bash
-apt-get update && apt-get install -y ca-certificates curl && \
-curl --proto '=https' --tlsv1.2 -fsSLo /root/setup_script.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/12dbb25fd0f640a6c49d35a7b4ac3b8f63629fb2/setup_script.sh && \
-printf '%s  %s\n' '088fd756cf612733d0a704b522a29202dfa71481ea9428dc8dbd762dfa04155f' '/root/setup_script.sh' | sha256sum -c - && \
-bash /root/setup_script.sh
-```
-
-这份固定脚本通过了[Debian 13 自动检查](https://github.com/syubroken/server_proxy_setup/actions/runs/36750337606)，仍不等于真实 VPS 已经通过。域名、邮箱和 `TRIAL` 确认在脚本运行后输入。它不要求你操作 Git 或理解版本号。
+修复版正在验证；固定下载入口将在 Linux 终端测试和其余检查全部通过后更新。此分支暂不提供安装命令。
 
 首次试装先选定测试机器和时间；你只需：
 
@@ -56,6 +49,12 @@ bash /opt/senyz-proxy-simple/setup_script.sh status
 - **暂不自动升级后退回旧版本**：目前没有“自动安装新版、失败再自动降级”的功能。这与已有的安装期间网络超时恢复是两回事；网络恢复也仍需在真机上验证。
 
 先完成新 VPS 的真实验收，再按使用情况安排版本维护或添加通知，正常使用不需要每天登录管理。
+
+## 报错时怎么做
+
+保留当前 SSH 窗口和最后约 10 行输出，先查看[故障处理](docs/TROUBLESHOOTING.md)。不要重跑旧安装器、强制重签证书或反复删掉 WARP 注册。排障可使用 `tools/diagnose.sh` 生成不含凭据的摘要；它不重启、不安装、不改配置，下载入口将在该版本检查通过后提供。
+
+新版不需要 Cloudflare API Key/Token。HTTP 证书验证不依赖这些凭据；把 Global API Key 写入 acme.sh 配置不能保证续期。如果此前暴露过 Global API Key，需要轮换该 Key，仅更换 API Token 不会撤销它。
 
 ## 当前不能承诺什么
 
