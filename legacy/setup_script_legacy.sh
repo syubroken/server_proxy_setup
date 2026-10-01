@@ -6,12 +6,12 @@ read -p "Enter your domain: " USER_DOMAIN
 
 # Update and upgrade packages
 echo "Updating and upgrading packages..."
-apt-get update
-apt-get upgrade -y
+apt update
+apt upgrade -y
 
 # Install required packages
 echo "Installing required packages..."
-apt-get install -y vim ufw socat nginx
+apt install -y vim ufw socat nginx
 
 # Create and write to .vimrc
 cat > ~/.vimrc <<EOF
