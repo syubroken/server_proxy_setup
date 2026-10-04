@@ -26,8 +26,10 @@ jobs:
         run: |
           bash -n setup_script.sh
           bash -n tools/diagnose.sh
+          bash -n tools/export_legacy_recovery.sh
           shellcheck --severity=warning setup_script.sh
           shellcheck --severity=warning tools/diagnose.sh
+          shellcheck --severity=warning tools/export_legacy_recovery.sh
           python3 tests/test_candidate.py
           python3 tests/test_cf_key_refresh.py
           # Preserve the existing upstream legacy file at 75dd5de; no repairs here.
