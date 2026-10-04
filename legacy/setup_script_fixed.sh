@@ -166,7 +166,7 @@ NGINX
     done
     crontab -l | grep -F '/root/.acme.sh' | grep -F -- '--cron' >/dev/null
     local tls_ready=false attempt
-    for attempt in {1..10}; do
+    for ((attempt=0; attempt<10; attempt++)); do
         if timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "$USER_DOMAIN" \
             -verify_hostname "$USER_DOMAIN" -verify_return_error </dev/null >/dev/null 2>&1; then
             tls_ready=true
