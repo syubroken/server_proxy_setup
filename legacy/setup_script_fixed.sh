@@ -48,12 +48,14 @@ set nocompatible
 set encoding=utf-8
 set fileencodings=utf-8,Chinese
 set tabstop=4
+set shiftwidth=4
 set number
 set autoindent
 set smartindent
 set nobackup
 set hlsearch
 set display=lastline
+syntax on
 VIM
 
     # Permit the current SSH port BEFORE enabling the original UFW firewall.
