@@ -18,11 +18,21 @@
 
 1. 在供应商面板重装干净 Debian 13 amd64。不能叠加在新版半成品或当前工作的旧代理上。
 2. 原域名在你的 Cloudflare 账号管理下，DNS A 指向该 VPS；建议保持仅 DNS/灰云，清除不正确的同名 AAAA。供应商防火墙放行 SSH 与 TCP 443，正常也保留 80。DNS 签发本身不需要公网 80。
-3. 下载修正版文件后用 Bash 执行；固定下载命令在完成代码检查后写入本页。
+3. 在重装后的 root SSH 终端复制下面整段。它先下载并校验固定版本，再用 Bash 执行：
+
+```bash
+apt-get update && apt-get install -y ca-certificates curl && \
+curl --proto '=https' --tlsv1.2 -fsSLo /root/setup_script_fixed.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/3b8f10d88eb14775b99a74e6e576493e609daaa8/legacy/setup_script_fixed.sh && \
+printf '%s  %s\n' '904b00f34bdbeb68e84ba05497c3e0a4c6a94e46af39d77e881b6f0ff56bef3b' '/root/setup_script_fixed.sh' | sha256sum -c - && \
+bash /root/setup_script_fixed.sh
+```
+
 4. 按提示输入 Cloudflare 注册邮箱、域名、**最新 Global API Key**。Key 输入不显示字符，不是 API Token，不要发给别人。
 5. 等待 Setup Complete，使用脚本最后给出的域名、UUID、443、WebSocket、`/ray` 和 TLS 参数配置客户端。新装 UUID 与以前不同，需要更新客户端。
 
 DNS 验证可能等待几分钟。错误时只看最后的“停止：某步骤未完成”及其前几行。Key/邮箱填错、临时下载失败等原因修正后，可以在**本修正版留下的系统上**重新执行同一脚本；它保留自己生成的 UUID，不需要为了重试再装系统。CA 明确限流时按提示等待，不加 `--force` 连续申请。
+
+重新执行只需 `bash /root/setup_script_fixed.sh`；不要在同一系统中交替运行原始旧脚本、新版 WARP 和这份修正版。
 
 以后如果再次更换 Cloudflare Global API Key，服务器保存的续期凭据也需更新；不能只在 Cloudflare 更换后放任旧值。
 
