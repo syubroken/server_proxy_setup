@@ -5,6 +5,7 @@ No Cloudflare, CA, firewall, package installation or live service is contacted.
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -138,8 +139,8 @@ class LegacyFixedTest(unittest.TestCase):
         (self.fixtures / 'v2ray-linux-64.zip').write_bytes(b'fixture only')
         script = (ROOT / 'legacy/setup_script_fixed.sh').read_text()
         # Translate a private copy only; production has no test environment switch.
-        for path in ('/run/systemd', '/proc/sys/kernel', '/usr/local', '/etc', '/root'):
-            script = script.replace(path, str(self.root) + path)
+        script = re.sub(r'(?<![\w/.-])/(?:run/systemd|proc/sys/kernel|usr/local|etc|root)',
+                        lambda match: str(self.root) + match[0], script)
         for digest, filename in (
             ('c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7', 'acme.sh'),
             ('9628ee8238cb3f9cfa1b1a985c0e9593436a3e4f8a9d65a6f775b981be9e76c8', 'dns_cf.sh'),
