@@ -27,11 +27,14 @@ jobs:
           bash -n setup_script.sh
           bash -n tools/diagnose.sh
           bash -n tools/export_legacy_recovery.sh
+          bash -n legacy/setup_script_fixed.sh
           shellcheck --severity=warning setup_script.sh
           shellcheck --severity=warning tools/diagnose.sh
           shellcheck --severity=warning tools/export_legacy_recovery.sh
+          shellcheck --severity=warning legacy/setup_script_fixed.sh
           python3 tests/test_candidate.py
           python3 tests/test_cf_key_refresh.py
+          python3 tests/test_legacy_fixed.py
           # Preserve the existing upstream legacy file at 75dd5de; no repairs here.
           test "$(sha256sum legacy/setup_script_legacy.sh | cut -d ' ' -f 1)" = b235ccfa254437bf76f234d69e061100b43ef2fedeacb3b3ef4367ffabc13568
       - name: Real Linux terminal and Bash entry checks
