@@ -1,10 +1,43 @@
 #!/usr/bin/env bash
-# senyz-proxy-simple 4.0.0-alpha2. Nginx + acme.sh + official consumer WARP. Trial only.
+# senyz-proxy-simple 4.0.0-alpha3. Nginx + acme.sh + official consumer WARP. Trial only.
 # The Bash entry embeds its Python standard-library runtime; no pip is used.
 set -euo pipefail
 set +x
 umask 077
 SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+# BEGIN APT WAIT
+# Retry only lock contention. Never delete locks or interrupt their owner.
+apt_wait() {
+    local log status started=$SECONDS
+    log=$(mktemp)
+    while true; do
+        if LC_ALL=C DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get \
+            -o DPkg::Lock::Timeout=0 -o Dpkg::Options::=--force-confdef \
+            -o Dpkg::Options::=--force-confold -o APT::Update::Error-Mode=any "$@" >"$log" 2>&1; then
+            cat "$log"; rm -f -- "$log"; return 0
+        else
+            status=$?
+        fi
+        if ! grep -Eq '^E: (Could not get lock |Unable to acquire .*lock|Unable to lock directory )' "$log"; then
+            cat "$log" >&2; rm -f -- "$log"; return "$status"
+        fi
+        if (( SECONDS - started >= 600 )); then
+            cat "$log" >&2; rm -f -- "$log"
+            printf '%s\n' '停止：等待软件安装锁超过 10 分钟。后台任务仍在运行；不要删除锁、杀进程或重装。稍后重跑同一脚本。' >&2
+            return "$status"
+        fi
+        printf '%s\n' '系统后台正在使用 apt/dpkg，自动等待 5 秒后继续（最多 10 分钟）；无需另开窗口运行 apt。'
+        sleep 5
+    done
+}
+# END APT WAIT
+
+if [[ "${1:-}" == internal-apt ]]; then
+    [[ $EUID == 0 ]] || exit 2
+    shift
+    apt_wait "$@"
+    exit
+fi
 if ! command -v python3 >/dev/null 2>&1; then
     if [[ "${1:-install}" != install && "${1:-install}" != trial-install ]]; then
         printf '%s\n' '只读检查：缺少 python3；没有安装或修改任何内容。'
@@ -26,8 +59,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     printf '%s\n' '这是尚未实机验收的候选安装，会安装 Debian 基础依赖。'
     read -r -p '仅在获准的全新测试机上继续；输入 TRIAL：' reply
     [[ "$reply" == TRIAL ]] || exit 2
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 ca-certificates
+    apt_wait update
+    apt_wait install -y python3 ca-certificates curl
 fi
 exec python3 - "$SELF" "$@" <<'SWO_PYTHON'
 import base64
@@ -49,10 +82,9 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 import zipfile
 
-VERSION = '4.0.0-alpha2'
+VERSION = '4.0.0-alpha3'
 SELF = Path(sys.argv[1]).resolve()
 BASE = Path('/var/lib/senyz-proxy-simple')
 ETC = Path('/etc/senyz-proxy-simple')
@@ -428,28 +460,58 @@ def verify_dns(domain, server):
         raise Stop('域名必须只解析到这台 VPS 的一个 A 记录，不能有橙云、其他 A 或 AAAA；脚本不修改 DNS。')
 
 
-class HTTPSOnly(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not newurl.startswith('https://'):
-            raise Stop('下载重定向未使用 HTTPS，停止。')
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
 def download(name):
     url, expected = DOWNLOADS[name]
     dest = BASE / 'downloads' / name
     if dest.is_file() and hashlib.sha256(dest.read_bytes()).hexdigest() == expected:
         return dest
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), HTTPSOnly())
-    try:
-        with opener.open(url, timeout=45) as response:
-            data = response.read(180 * 1024 * 1024 + 1)
-    except Exception:
-        raise Stop('官方资源下载失败：' + name + '；没有自动重试。') from None
-    if len(data) > 180 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != expected:
-        raise Stop('官方资源摘要不匹配：' + name + '；停止，不执行下载内容。')
-    atomic(dest, data)
-    return dest
+    if not shutil.which('curl'):
+        raise Stop('缺少 curl，请使用当前说明中的完整下载入口准备基础依赖。')
+    labels = {5: '代理名称解析失败', 6: 'DNS 解析失败', 7: 'TCP 连接失败',
+              18: '下载不完整', 23: '本地文件写入失败', 28: '连接或下载超时',
+              35: 'TLS 握手失败', 47: '重定向过多', 56: '连接接收失败',
+              60: 'TLS 证书校验失败（检查系统时间、CA 和网络）', 63: '文件超过大小限制'}
+    # Only public GETs are retried; registration and ACME have separate policies.
+    with tempfile.TemporaryDirectory(prefix='sps-download-') as scratch:
+        part = Path(scratch) / name
+        ipv4 = False
+        for attempt in range(1, 4):
+            args = ['curl', '--noproxy', '*', '--proto', '=https', '--proto-redir', '=https',
+                    '--tlsv1.2', '--location', '--max-redirs', '5', '--fail', '--silent', '--show-error',
+                    '--connect-timeout', '15', '--max-time', '180', '--max-filesize', str(180 * 1024 * 1024),
+                    '--output', part, '--write-out', '%{http_code}']
+            if ipv4:
+                args.append('-4')
+            result = run([*args, url], check=False, timeout=195)
+            status = result.stdout.strip()
+            if result.returncode == 0:
+                data = part.read_bytes()
+                if len(data) > 180 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != expected:
+                    raise Stop('官方资源摘要不匹配：' + name + '；停止，不执行下载内容。')
+                atomic(dest, data)
+                return dest
+            reason = labels.get(result.returncode, 'curl 错误')
+            if result.returncode == 22 and re.fullmatch(r'[1-5][0-9]{2}', status):
+                reason = 'HTTP ' + status
+            details = f'{name}：{reason}；curl={result.returncode}；尝试 {attempt}/3'
+            retryable = result.returncode in (6, 7, 18, 28, 56) or (
+                result.returncode == 22 and status in ('408', '500', '502', '503', '504'))
+            # Fail immediately on TLS, 403/404/429, redirects or checksum problems.
+            if not retryable or attempt == 3:
+                raise Stop('官方资源下载失败：' + details + '。未跳过校验；不需要因此重装。')
+            ipv4 = result.returncode in (6, 7, 18, 28, 56)
+            say('下载暂未成功，5 秒后重试公开文件：' + details + ('；下一次使用 IPv4' if ipv4 else ''))
+            time.sleep(5)
+
+
+def apt_run(*args):
+    # Stream progress and lock-wait notices; arguments are never shell-interpolated.
+    env = os.environ.copy()
+    for key in ('http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'):
+        env.pop(key, None)
+    p = subprocess.run(['bash', str(SELF), 'internal-apt', *map(str, args)], check=False, env=env)
+    if p.returncode:
+        raise Stop('系统软件准备未完成，apt 退出码 ' + str(p.returncode) + '；见上方原因，不需要因此重装。')
 
 
 def create_user(name, home):
@@ -586,6 +648,8 @@ def prepare():
     if s.get('prepared'):
         return
     say('准备官方 WARP、V2Ray、Nginx 和证书工具。')
+    # Validate all public downloads before masking services or installing the stack.
+    files = {name: download(name) for name in DOWNLOADS}
     policy = Path('/usr/sbin/policy-rc.d')
     owned_policy = '#!/bin/sh\n# senyz-proxy-simple installation guard\nexit 101\n'
     if policy.exists() and policy.read_text() != owned_policy:
@@ -593,17 +657,15 @@ def prepare():
     atomic(policy, owned_policy, 0o755)
     try:
         run(['systemctl', 'mask', 'warp-svc.service', 'nginx.service'])
-        env = {'DEBIAN_FRONTEND': 'noninteractive', 'NEEDRESTART_MODE': 'l'}
-        run(['apt-get', 'update'], timeout=240, env=env)
-        run(['apt-get', 'install', '-y', 'ca-certificates', 'curl', 'nftables', 'gnupg', 'nginx',
-             'openssl', 'iproute2', 'qrencode', 'unattended-upgrades'], timeout=600, env=env)
-        files = {name: download(name) for name in DOWNLOADS}
+        apt_run('update')
+        apt_run('install', '-y', 'ca-certificates', 'curl', 'nftables', 'gnupg', 'nginx',
+                'openssl', 'iproute2', 'qrencode', 'unattended-upgrades')
         run(['gpg', '--batch', '--yes', '--dearmor', '--output', '/usr/share/keyrings/sps-cloudflare.gpg', files['warp-key']])
         os.chmod('/usr/share/keyrings/sps-cloudflare.gpg', 0o644)
         atomic('/etc/apt/sources.list.d/sps-cloudflare.list',
                'deb [arch=amd64 signed-by=/usr/share/keyrings/sps-cloudflare.gpg] https://pkg.cloudflareclient.com/ trixie main\n', 0o644)
-        run(['apt-get', 'update'], timeout=240, env=env)
-        run(['apt-get', 'install', '-y', files['warp.deb']], timeout=600, env=env)
+        apt_run('update')
+        apt_run('install', '-y', files['warp.deb'])
     finally:
         if policy.exists() and policy.read_text() == owned_policy:
             policy.unlink()

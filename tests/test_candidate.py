@@ -281,14 +281,68 @@ class CandidateTest(unittest.TestCase):
         self.assertFalse((self.app.BASE / 'client-trial.txt').exists())
 
     def test_corrupt_download_is_never_saved_or_executed(self):
-        response = io.BytesIO(b'corrupt-not-an-executable')
-        opener = Mock()
-        opener.open.return_value = response
-        with patch.object(self.app.urllib.request, 'build_opener', return_value=opener):
-            with self.assertRaisesRegex(self.app.Stop, '摘要不匹配'):
-                self.app.download('v2ray.zip')
+        def curl(args, **kwargs):
+            Path(args[args.index('--output') + 1]).write_bytes(b'corrupt-not-an-executable')
+            return subprocess.CompletedProcess(args, 0, '200', '')
+        self.app.run.side_effect = curl
+        with self.assertRaisesRegex(self.app.Stop, '摘要不匹配'):
+            self.app.download('v2ray.zip')
         self.assertFalse((self.app.BASE / 'downloads/v2ray.zip').exists())
+        self.assertEqual(self.app.run.call_count, 1)
+
+    def test_download_transport_retry_ipv4_and_cache(self):
+        data = b'fixture verified public file'
+        self.app.DOWNLOADS['fixture'] = ('https://example.com/file', self.app.hashlib.sha256(data).hexdigest())
+        calls = []
+        def curl(args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(args, 28, '000', 'raw-error-not-for-display')
+            Path(args[args.index('--output') + 1]).write_bytes(data)
+            return subprocess.CompletedProcess(args, 0, '200', '')
+        self.app.run.side_effect = curl
+        with patch.object(self.app.time, 'sleep') as sleep:
+            result = self.app.download('fixture')
+            self.assertEqual(result.read_bytes(), data)
+            self.assertEqual(self.app.download('fixture'), result)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn('-4', calls[0])
+        self.assertIn('-4', calls[1])
+        self.assertIn('--proto-redir', calls[0])
+        self.assertNotIn('--insecure', calls[0])
+        sleep.assert_called_once_with(5)
+
+    def test_download_tls_http_denial_and_limit_are_not_retried(self):
+        for code, http, text in ((60, '000', 'TLS 证书校验失败'), (22, '403', 'HTTP 403'),
+                                 (22, '404', 'HTTP 404'), (22, '429', 'HTTP 429')):
+            with self.subTest(code=code, http=http):
+                self.app.run.reset_mock(side_effect=True)
+                self.app.run.return_value = subprocess.CompletedProcess([], code, http, 'must-not-leak')
+                with patch.object(self.app.time, 'sleep') as sleep:
+                    with self.assertRaisesRegex(self.app.Stop, text) as caught:
+                        self.app.download('warp-key')
+                self.assertNotIn('must-not-leak', str(caught.exception))
+                self.assertEqual(self.app.run.call_count, 1)
+                sleep.assert_not_called()
+        self.assertFalse((self.app.BASE / 'downloads/warp-key').exists())
+
+    def test_download_transient_errors_stop_after_three_attempts(self):
+        for code, http in ((6, '000'), (22, '503')):
+            self.app.run.reset_mock(side_effect=True)
+            self.app.run.return_value = subprocess.CompletedProcess([], code, http, '')
+            with patch.object(self.app.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(self.app.Stop, '尝试 3/3'):
+                    self.app.download('warp-key')
+            self.assertEqual(self.app.run.call_count, 3)
+            self.assertEqual(sleep.call_count, 2)
+
+    def test_public_download_failure_precedes_package_or_service_changes(self):
+        self.app.state_update(prepared=False)
+        self.app.download = Mock(side_effect=self.app.Stop('TLS 证书校验失败'))
+        with self.assertRaisesRegex(self.app.Stop, 'TLS'):
+            self.app.prepare()
         self.assertEqual(self.commands, [])
+        self.assertFalse(self.app.load(self.app.STATE)['prepared'])
 
     def test_diagnostics_allowlist_excludes_sensitive_state(self):
         self.app.state_update(secret='must-not-export', private_key='must-not-export',
