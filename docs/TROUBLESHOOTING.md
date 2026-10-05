@@ -2,6 +2,24 @@
 
 适用于当前精简试装版，也说明旧 legacy 方案的已知风险。先保留还能登录的 SSH 窗口。已经恢复联网的机器先保持原状，不执行整套重装脚本，不追加旧 WARP 安装命令，不因为一个错误就重新申请证书。
 
+## 2026-10-05：安装锁与官方公钥下载
+
+旧修正版的 `Could not get lock /var/lib/dpkg/lock-frontend ... held by process ... (apt-get)` 表示另一个软件安装任务正在运行。不同供应商镜像可能通过 cloud-init 或自动更新在首次启动时更新软件；日志只能确认 apt-get 占锁，不能确认由哪一种后台服务启动。用户后来手动 apt 操作后安装成功，并不能证明额外安装 gpg 或 dos2unix 才能修复；等待期间锁已释放是合理解释。
+
+当前入口和两份安装器均自动等待锁，最多 10 分钟；`apt-get update` 的列表锁也单独涵盖，不只依赖对 update 未必生效的 DPkg 锁选项。软件包缺失、软件源故障或 dpkg 中断等其他问题不按锁问题循环重试。不要删除锁文件、强杀健康的安装进程或仅因占锁重装。
+
+`warp-key` 是 Cloudflare 软件仓库的公开签名公钥，不是用户的 Global API Key。alpha2 下载失败时捕获了所有异常却只给出统一提示，因此无法从历史日志区分 DNS、网络超时、TLS 或 HTTP 错误。尚未到 WARP 注册/连接或证书签发阶段；不能归因于 WARP 账号、域名或 API Key。
+
+2026-10-05 官方软件源页面仍列明 Debian 13/Trixie，仍提供相同公钥地址。维护电脑直连复查得到 TLS 主机名校验失败，而网页读取渠道能访问该公开公钥；这是不同来源的当前结果，不能据此认定用户此前 VPS 也遭遇相同 TLS 错误。保持证书验证，不采用 `curl -k`、HTTP 或第三方镜像。
+
+alpha3 对公开 GET 使用有超时限制的 curl：网络临时错误最多三次，必要时尝试 IPv4；HTTP 403/404/429、TLS 校验、摘要不符立即停止。错误显示文件名、类别、curl 状态与尝试次数，不输出密钥。下载安排在屏蔽服务和安装整套依赖之前；失败仍可能留下本项目准备状态，但无需因此重装。软件包安装锁同样自动等待。
+
+这不能保证外部网站永远可达。旧 alpha2 半成品不可直接用 alpha3 `resume`，跨版本迁移需核对状态；用户此次已重装为成功的旧修正版，应保留现状。alpha3 面向下一台干净测试机；其自身下载失败时，网络恢复后重跑同一固定版本可继续。
+
+可短期使用另一台 Debian 13 amd64 完整虚拟机验证主方案，使用独立测试子域名。测试供应商不限定；一次仅测试下载与安装、WARP/SSH、代理与证书、恢复等阶段，操作交由维护者完成。新机器不保证绕过 Cloudflare 的限流或访问限制。
+
+来源：[Cloudflare 官方软件源](https://pkg.cloudflareclient.com/)、[Debian dpkg FAQ](https://wiki.debian.org/Teams/Dpkg/FAQ)、[cloud-init 软件安装模块](https://cloudinit.readthedocs.io/en/latest/topics/modules.html#package-update-upgrade-install)。
+
 ## 2026-10-01 的终端报错
 
 alpha1 在第一次询问域名前报告“需要交互 SSH 终端”，是脚本缺陷：Python 用 `r+` 打开不能定位的 `/dev/tty`，真实终端也会失败；异常又被错误归因为没有 SSH 终端。不是用户粘贴命令的错误。
