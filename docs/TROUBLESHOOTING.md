@@ -2,6 +2,26 @@
 
 适用于当前精简试装版，也说明旧 legacy 方案的已知风险。先保留还能登录的 SSH 窗口。已经恢复联网的机器先保持原状，不执行整套重装脚本，不追加旧 WARP 安装命令，不因为一个错误就重新申请证书。
 
+## 2026-10-05：WARP 安装提示和 ip 退出码 255
+
+`Setting up cloudflare-warp ...` 表示包进入配置阶段。公钥 may require updating 是软件包提醒，不是已确认公钥失效；安装器已用校验后的官方公钥写入自己的 sps-cloudflare.gpg，软件源通过 signed-by 指向它。不要仅因提醒再执行另一套导入命令。
+
+`warp-svc.service is masked` 和 `policy-rc.d returned 101` 是安装器暂时阻止包自启动的预期结果，避免管理路由和业务阻断规则准备好之前 WARP 改动网络。脚本在这些检查通过后才解除 mask 并启动 WARP。
+
+真正失败的是 `检查/操作失败：ip，退出码 255`。旧输出没有具体子命令与 stderr，不能仅凭它断定哪条 ip 操作失败，更不能认定是用户按 Enter 的位置造成。
+
+已在 Debian 13 隔离网络重现一个吻合的缺陷：alpha3 把 `ip route show` 文本拆词回填给 `ip route replace`；IPv6 RA 显示为 `expires 599sec`，设置命令却要求纯整数，因而返回 255。alpha4 改用 JSON 构造管理副本，并保留网关/onlink/指标及连接路由顺序；未知扩展在预检停止，ip 失败显示操作和脱敏详情。[复现与修复检查](https://github.com/syubroken/server_proxy_setup/actions/runs/37291093348) 已通过。尚未取得故障 VPS 原路由快照，不能把这一吻合的复现当成其唯一根因。
+
+安全停止后新的 SSH 成功登录，说明该次管理入口仍可达，不能把它当作代理/WARP 成功。用户已重装并一次运行旧修正版成功，当前保持使用；不用为了 alpha4 又重装，也不用在其上叠加新版。
+
+## 测试子域名和粘贴命令
+
+一个 Cloudflare 区域可以管理多个不同名字。现有 `senyz.top` 保持原 A 记录，新服务器可另加 `warp-test.senyz.top`：类型 A、名称 warp-test、内容为测试 VPS IPv4、仅 DNS/灰云、TTL 自动。测试名称不配置其他 A/AAAA。它与原节点独立，不需要另买域名；不是给现用同名记录加第二个 IP。用户未决定测试服务器时，无需现在改 DNS。[Cloudflare 子域名说明](https://developers.cloudflare.com/dns/manage-dns-records/how-to/create-subdomain/)。
+
+在正常 Bash SSH 终端里，Enter 提交整条已输入命令，不会只执行光标前面的文字。完整粘贴后光标在末尾 `)` 前也可以回车，先按右箭头或 End 到末尾再回车同样正确。外层括号是在子 shell 执行命令块，避免其中退出影响整个 SSH 会话，不表示试用次数或其他用户输入。
+
+若终端只有 `>` 等续行提示而尚未开始执行，说明 Bash 还在等待完整命令；此时可 Ctrl+C 取消当前未执行输入，重新复制完整代码块，不复制 Markdown 的三反引号。不要把这个 Ctrl+C 建议用于正在运行的 apt、安装器或证书申请。
+
 ## 2026-10-05：安装锁与官方公钥下载
 
 旧修正版的 `Could not get lock /var/lib/dpkg/lock-frontend ... held by process ... (apt-get)` 表示另一个软件安装任务正在运行。不同供应商镜像可能通过 cloud-init 或自动更新在首次启动时更新软件；日志只能确认 apt-get 占锁，不能确认由哪一种后台服务启动。用户后来手动 apt 操作后安装成功，并不能证明额外安装 gpg 或 dos2unix 才能修复；等待期间锁已释放是合理解释。

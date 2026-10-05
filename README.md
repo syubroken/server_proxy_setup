@@ -2,7 +2,7 @@
 
 个人 Debian VPS 代理脚本。当前方向：**保留 V2Ray + VMess/WebSocket/TLS + Nginx，使用官方 WARP，修好证书自动续期。** 不需要 Zero Trust、Cloudflare API Key 或复杂菜单。
 
-**当前精简版 4.0.0-alpha3 是试装候选，还没有在真实干净 VPS 上完成完整验收。不要在正在使用的代理服务器上叠加执行。** 历史脚本及其已知问题保留在 [`legacy/`](legacy/README.md)。
+**当前精简版 4.0.0-alpha4 是试装候选，还没有在真实干净 VPS 上完成完整验收。不要在正在使用的代理服务器上叠加执行。** 历史脚本及其已知问题保留在 [`legacy/`](legacy/README.md)。
 
 alpha1 已因终端输入缺陷撤回：正常 SSH 会话也可能报“需要交互 SSH 终端”。不要再使用旧提交 `12dbb25` 的安装命令；alpha2 修复此问题。它发生在域名输入前，本身不要求重装系统。已经装回旧方案的服务器先保持现状。详见[故障处理](docs/TROUBLESHOOTING.md)。
 
@@ -47,14 +47,16 @@ apt_wait() {
 # END APT WAIT
 apt_wait update
 apt_wait install -y ca-certificates curl python3
-curl --proto '=https' --tlsv1.2 -fsSLo /root/setup_script.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/4f4932de45709d7c4375aa33508f6a65d4841a6e/setup_script.sh
-printf '%s  %s\n' 'a5921a8bf67018634120301b08441351cafe5883faaaa324483c64ec98159fa8' '/root/setup_script.sh' | sha256sum -c -
+curl --proto '=https' --tlsv1.2 -fsSLo /root/setup_script.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/df845c6b1c7cedcf75192808125b04259e69d51f/setup_script.sh
+printf '%s  %s\n' '72f97b6c6fb82e128e652ccc326d3777616a9adb67f4d8167d47164f61c8e28a' '/root/setup_script.sh' | sha256sum -c -
 bash /root/setup_script.sh check
 bash /root/setup_script.sh
 )
 ```
 
-alpha3 修复安装锁等待与官方下载诊断：入口准备和脚本内部都自动等待 apt/dpkg 锁，最多 10 分钟；仅在锁竞争时重试，不删除锁或杀进程。命令较长是为了把等待逻辑一并带上，整段复制即可，不需要先执行旧方案的几条 apt 命令。
+alpha4 在保留安装锁和下载修复的基础上，修正原生 IPv6 路由文本回放，并显示脱敏 ip 错误详情。真实 Debian 隔离网络已重现旧版 expires/255 并验证修复，仍不是 VPS 全流程验收。
+
+安装锁等待与官方下载诊断：入口准备和脚本内部都自动等待 apt/dpkg 锁，最多 10 分钟；仅在锁竞争时重试，不删除锁或杀进程。命令较长是为了把等待逻辑一并带上，整段复制即可，不需要先执行旧方案的几条 apt 命令。
 
 官方公开文件最多下载三次，传输故障会尝试 IPv4；TLS、403/404/429 或摘要错误立即停止并报告具体类别。先校验文件，再屏蔽服务、安装整套依赖。基础准备会安装/更新 python3、curl 和 ca-certificates；不需要 Cloudflare API 凭据。离线检查和真实 Debian 锁检查见 [验证记录](docs/VALIDATION.md)，不等于真实 VPS 全流程通过。
 
