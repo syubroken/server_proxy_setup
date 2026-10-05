@@ -14,6 +14,33 @@ download() {
     printf '%s  %s\n' "$digest" "$destination" | sha256sum -c -
 }
 
+# BEGIN APT WAIT
+# Retry only lock contention. Never delete locks or interrupt their owner.
+apt_wait() {
+    local log status started=$SECONDS
+    log=$(mktemp)
+    while true; do
+        if LC_ALL=C DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get \
+            -o DPkg::Lock::Timeout=0 -o Dpkg::Options::=--force-confdef \
+            -o Dpkg::Options::=--force-confold -o APT::Update::Error-Mode=any "$@" >"$log" 2>&1; then
+            cat "$log"; rm -f -- "$log"; return 0
+        else
+            status=$?
+        fi
+        if ! grep -Eq '^E: (Could not get lock |Unable to acquire .*lock|Unable to lock directory )' "$log"; then
+            cat "$log" >&2; rm -f -- "$log"; return "$status"
+        fi
+        if (( SECONDS - started >= 600 )); then
+            cat "$log" >&2; rm -f -- "$log"
+            printf '%s\n' '停止：等待软件安装锁超过 10 分钟。后台任务仍在运行；不要删除锁、杀进程或重装。稍后重跑同一脚本。' >&2
+            return "$status"
+        fi
+        printf '%s\n' '系统后台正在使用 apt/dpkg，自动等待 5 秒后继续（最多 10 分钟）；无需另开窗口运行 apt。'
+        sleep 5
+    done
+}
+# END APT WAIT
+
 main() {
     [[ $EUID == 0 && -d /run/systemd/system ]] || stop '在 Debian VPS 的 root SSH 终端运行。'
     [[ -t 0 ]] || stop '请先下载到文件，再用 bash 运行，不要通过管道运行。'
@@ -40,9 +67,10 @@ main() {
 
     stage='系统与软件安装'
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get upgrade -y
-    apt-get install -y vim ufw socat nginx ca-certificates curl openssl cron unzip
+    printf '%s\n' '准备系统软件；如后台初始化占用安装锁，将自动等待。软件安装时请耐心等待。'
+    apt_wait update
+    apt_wait upgrade -y
+    apt_wait install -y vim ufw socat nginx ca-certificates curl openssl cron unzip
     cat > /root/.vimrc <<'VIM'
 set nocompatible
 set encoding=utf-8

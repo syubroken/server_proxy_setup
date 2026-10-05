@@ -35,6 +35,7 @@ jobs:
           python3 tests/test_candidate.py
           python3 tests/test_cf_key_refresh.py
           python3 tests/test_legacy_fixed.py
+          python3 tests/test_apt_wait.py
           # Preserve the existing upstream legacy file at 75dd5de; no repairs here.
           test "$(sha256sum legacy/setup_script_legacy.sh | cut -d ' ' -f 1)" = b235ccfa254437bf76f234d69e061100b43ef2fedeacb3b3ef4367ffabc13568
       - name: Real Linux terminal and Bash entry checks
@@ -43,3 +44,9 @@ jobs:
         run: python3 tests/linux_checks.py
       - name: Exercise firewall in isolated network namespaces
         run: SPS_ISOLATED_TEST=1 unshare --mount --net --propagation private python3 tests/linux_checks.py --kernel
+      - name: Read-only official key download (not VPS acceptance)
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          curl --noproxy '*' --proto '=https' --proto-redir '=https' --tlsv1.2 --location --fail --silent --show-error --connect-timeout 15 --max-time 45 --output /tmp/sps-key-check https://pkg.cloudflareclient.com/pubkey.gpg
+          printf '%s  %s\n' '0f37fc298c98e88ee3c0ee68c95b69f1dba9eb477abe3167e13982105911264d' /tmp/sps-key-check | sha256sum -c -
