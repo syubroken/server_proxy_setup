@@ -1,14 +1,24 @@
 # 精简版验证边界
 
-版本 4.0.0-alpha3，2026-10-05。这是试装候选，不是生产通过记录。
+版本 4.0.0-alpha4，2026-10-05。这是试装候选，不是生产通过记录。
 
 alpha1 已在用户真实 VPS 上暴露首次终端输入失败；此前 35 项测试没有覆盖真实控制终端，不能用当时 CI 通过否认该缺陷。alpha2 修复 `/dev/tty` 读写方式，增加 6 项 Linux PTY 测试（包括实际 Bash/内嵌 Python 入口）。
 
 [alpha2 固定代码提交 4ed2ba2 的 CI](https://github.com/syubroken/server_proxy_setup/actions/runs/36864449181) 已全部通过：35 项回归、6 项 Linux PTY 测试、Bash/ShellCheck、Nginx/systemd 配置与隔离内核网络检查。PTY 中确实重现旧版 r+ 异常，并验证新入口、连续输入、取消和中断。没有执行真实 WARP 注册或真实 VPS 安装。
 
-当前安装脚本 SHA-256：`a5921a8bf67018634120301b08441351cafe5883faaaa324483c64ec98159fa8`。只读诊断脚本 SHA-256：`bb852732274cdce93e22017ff8eff3732936cf57a6700b1ccec03c0048b38941`。诊断脚本已过 Bash/ShellCheck，不能代替真实服务器上的故障诊断结果。
+当前安装脚本 SHA-256：`72f97b6c6fb82e128e652ccc326d3777616a9adb67f4d8167d47164f61c8e28a`。只读诊断脚本 SHA-256：`bb852732274cdce93e22017ff8eff3732936cf57a6700b1ccec03c0048b38941`。诊断脚本已过 Bash/ShellCheck，不能代替真实服务器上的故障诊断结果。
 
-## alpha3 本次变更
+## alpha4 路由兼容性修复
+
+固定代码提交：`df845c6b1c7cedcf75192808125b04259e69d51f`。主脚本摘要见上；旧修正版与原始 legacy 均未更改。
+
+[Debian 13 CI](https://github.com/syubroken/server_proxy_setup/actions/runs/37291093348) 通过。真实独立网络命名空间先创建带有效期的 IPv6 RA 路由，按 alpha3 的方式回放显示文本，确实得到退出码 255 和 expires 参数解析错误。再调用新版实际 management_routes，验证 IPv4 DHCP、IPv6 RA、/32 onlink 网关、root 原生路由选择、重复执行、清理和保留 main 路由。新增 6 项单元测试，既有全部检查继续通过。
+
+管理副本使用 JSON 构造，不回放 expires Nsec、linkdown 等显示字段。副本不设 RA 倒计时，开机/启动时按当前原生路由重建；原 main 表仍由内核/供应商管理。未知多路径或扩展属性在预检拒绝。此设计仍不保证运行过程中任意 DHCP/RA 网关变化可自动追踪；公网地址或供应商网络结构改变需另行审核。
+
+这确认了一个能产生相同退出码的脚本缺陷，不能唯一归因用户已重装的故障机器；其旧输出未保留具体 ip 命令及 stderr。新报错显示操作和脱敏原因。用户已确认安全停止后新 SSH 登录成功；这只证明当时 SSH 可达，主方案尚未完整实机通过。
+
+## alpha3 历史变更
 
 代码提交：`4f4932de45709d7c4375aa33508f6a65d4841a6e`。修复新版和备用脚本的安装锁等待、官方文件下载的错误分类及有限重试。旧修正版用户报告安装完成，WARP 主方案仍未实机通过；续期尚未实际演练。
 

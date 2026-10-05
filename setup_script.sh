@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# senyz-proxy-simple 4.0.0-alpha3. Nginx + acme.sh + official consumer WARP. Trial only.
+# senyz-proxy-simple 4.0.0-alpha4. Nginx + acme.sh + official consumer WARP. Trial only.
 # The Bash entry embeds its Python standard-library runtime; no pip is used.
 set -euo pipefail
 set +x
@@ -84,7 +84,7 @@ import tempfile
 import time
 import zipfile
 
-VERSION = '4.0.0-alpha3'
+VERSION = '4.0.0-alpha4'
 SELF = Path(sys.argv[1]).resolve()
 BASE = Path('/var/lib/senyz-proxy-simple')
 ETC = Path('/etc/senyz-proxy-simple')
@@ -135,6 +135,16 @@ def run(args, *, check=True, timeout=30, data=None, env=None):
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Stop('命令无法完成：' + str(args[0]) + '（' + type(exc).__name__ + '）') from None
     if check and p.returncode:
+        if str(args[0]) == 'ip':
+            # iproute2 diagnostics contain network addresses, never credentials.
+            # Keep the useful parser/kernel reason while hiding literal addresses.
+            detail = re.sub(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:/[0-9]+)?', '<IPv4>', p.stderr)
+            detail = re.sub(r'(?<![\w:])[0-9a-fA-F]*:[0-9a-fA-F:]+(?:%[\w.-]+)?(?:/[0-9]+)?', '<IPv6>', detail)
+            detail = re.sub(r'[\x00-\x1f\x7f]', ' ', detail).strip()[:400]
+            words = {'-4', '-6', '-j', 'address', 'route', 'rule', 'link', 'show', 'get',
+                     'add', 'replace', 'del', 'flush'}
+            operation = ' '.join(str(a) for a in args[1:] if str(a) in words)
+            raise Stop(f'网络命令失败：ip {operation}；退出码 {p.returncode}；{detail or "未提供错误详情"}')
         # Do not echo command arguments, config content or raw service logs.
         raise Stop('检查/操作失败：' + str(args[0]) + '，退出码 ' + str(p.returncode))
     return p
@@ -426,6 +436,7 @@ def clean_check():
         raise Stop('部署所需端口已占用，停止。')
     if run(['timedatectl', 'show', '-p', 'NTPSynchronized', '--value']).stdout.strip() != 'yes':
         raise Stop('系统尚未完成时间同步；待同步后重新检查，不继续安装。')
+    native_route_plan()  # Reject unsupported route forms before installing anything.
     return conn
 
 
@@ -441,7 +452,7 @@ def initial_network(conn):
     for family in ('-4', '-6'):
         p = run(['ip', family, 'route', 'show', 'table', 'main'])
         main[family] = [line for line in p.stdout.splitlines() if line.strip()]
-    # No shell executes route lines; parsed tokens are passed directly to iproute2.
+    # Text is a diagnostic snapshot only; route installation uses structured JSON.
     return {'dev': dev, 'main': main, 'resolv': Path('/etc/resolv.conf').read_text()}
 
 
@@ -665,6 +676,7 @@ def prepare():
         atomic('/etc/apt/sources.list.d/sps-cloudflare.list',
                'deb [arch=amd64 signed-by=/usr/share/keyrings/sps-cloudflare.gpg] https://pkg.cloudflareclient.com/ trixie main\n', 0o644)
         apt_run('update')
+        say('安装 WARP 包时会暂时阻止自启动；masked 和 policy-rc.d 101 是此阶段的预期提示。')
         apt_run('install', '-y', files['warp.deb'])
     finally:
         if policy.exists() and policy.read_text() == owned_policy:
@@ -717,6 +729,53 @@ def clear_own_routes():
             run(['ip', family, 'route', 'flush', 'table', table], check=False)
 
 
+def native_route_plan():
+    """Build native management copies from JSON, never replay display text.
+
+    RA lifetime/expiry and linkdown/offload markers are status, not CLI tokens.
+    The native main table remains untouched; the management copies deliberately
+    have no RA expiry and are rebuilt at boot/start from current native routes.
+    """
+    plan = {}
+    allowed = {'dst', 'dev', 'gateway', 'prefsrc', 'protocol', 'scope', 'metric',
+               'pref', 'flags', 'type', 'table', 'expires', 'metrics'}
+    for family in ('-4', '-6'):
+        rows = json.loads(run(['ip', family, '-j', 'route', 'show', 'table', 'main']).stdout)
+        commands = []
+        for row in rows:
+            if row.get('dev') == WARP_IF:
+                continue
+            if set(row) - allowed or row.get('type', 'unicast') not in (
+                    'unicast', 'blackhole', 'unreachable', 'prohibit', 'throw'):
+                raise Stop('原生路由包含未支持的多路径或扩展属性；未安装管理路由，需要审核。')
+            flags = set(row.get('flags', []))
+            if flags - {'onlink', 'linkdown', 'offload', 'trap', 'rt_offload', 'rt_trap', 'notify'}:
+                raise Stop('原生路由包含未支持的标志；未安装管理路由，需要审核。')
+            command = ['ip', family, 'route', 'replace', 'table', WAN_TABLE,
+                       row.get('type', 'unicast'), row.get('dst', 'default')]
+            for key, option in (('gateway', 'via'), ('dev', 'dev'), ('prefsrc', 'src'),
+                                ('scope', 'scope'), ('metric', 'metric'), ('pref', 'pref')):
+                if key in row:
+                    command += [option, str(row[key])]
+            # Copies are explicitly static; kernel/DHCP/RA own only the main table.
+            command += ['proto', 'static']
+            metrics = row.get('metrics', {})
+            if isinstance(metrics, list) and len(metrics) == 1:
+                metrics = metrics[0]
+            if not isinstance(metrics, dict) or set(metrics) - {'mtu', 'advmss', 'hoplimit'}:
+                raise Stop('原生路由包含未支持的指标；未安装管理路由，需要审核。')
+            for key, value in metrics.items():
+                if type(value) is not int or value < 0:
+                    raise Stop('原生路由指标不是可支持的整数；未安装管理路由。')
+                command += [key, str(value)]
+            if 'onlink' in flags:
+                command.append('onlink')
+            commands.append((bool(row.get('gateway')), command))
+        # Connected/host routes must precede routes that depend on a gateway.
+        plan[family] = [command for _, command in sorted(commands, key=lambda item: item[0])]
+    return plan
+
+
 def management_routes():
     s = load(STATE)
     dev = s['network']['dev']
@@ -724,14 +783,11 @@ def management_routes():
     original = s['ssh']['server']
     if not any(a.get('local') == original for row in addresses for a in row.get('addr_info', [])):
         raise Stop('原公网地址已改变；拒绝重用旧管理路由。')
+    plan = native_route_plan()
     clear_own_routes()
     for family in ('-4', '-6'):
-        # Capture the current main table at boot rather than blindly replay stale DHCP lifetimes.
-        routes = run(['ip', family, 'route', 'show', 'table', 'main']).stdout.splitlines()
-        for line in routes:
-            tokens = line.split()
-            if tokens and WARP_IF not in tokens:
-                run(['ip', family, 'route', 'replace', 'table', WAN_TABLE, *tokens])
+        for command in plan[family]:
+            run(command)
         run(['ip', family, 'rule', 'add', 'pref', '81', 'uidrange', f"{s['proxy_uid']}-{s['proxy_uid']}", 'lookup', BUSINESS_TABLE])
         run(['ip', family, 'rule', 'add', 'pref', '82', 'uidrange', '0-0', 'lookup', WAN_TABLE])
     run(['ip', '-4', 'rule', 'add', 'pref', '83', 'from', original + '/32', 'lookup', WAN_TABLE])
@@ -977,11 +1033,13 @@ def verify_blocking_without_tunnel():
 def connect_warp():
     say('检查官方 WARP；注册最多调用一次，发现限流即停止。')
     nft_apply()
+    say('准备原生 SSH 管理路由；此步骤通过后才启动 WARP。')
     management_routes()
     verify_blocking_without_tunnel()
     assert_transaction()
     run(['systemctl', 'reset-failed', 'sps-guard.service', 'warp-svc.service'], check=False)
     run(['systemctl', 'start', 'sps-guard.service'])
+    say('管理路由及业务阻断检查通过，开始启动官方 WARP。')
     started = int(time.time())
     with lock('transaction.lock', nonblocking=False):
         assert_transaction()
