@@ -40,12 +40,16 @@ def configs():
         unit_files = []
         for name, content in units.items():
             if '/' in name:
-                continue  # Drop-in content is covered by unit tests.
+                target = app.ETC / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+                continue
             target = app.ETC / name
             target.write_text(content)
             unit_files.append(target)
         # WARP is intentionally not installed in this offline test environment.
         (app.ETC / 'warp-svc.service').write_text('[Service]\nExecStart=/usr/bin/true\n')
+        unit_files.append(app.ETC / 'warp-svc.service')
         run(['systemd-analyze', 'verify', *unit_files])
     print('Nginx HTTP/TLS configs and systemd unit syntax: PASS')
 

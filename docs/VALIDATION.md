@@ -1,12 +1,22 @@
 # 精简版验证边界
 
-版本 4.0.0-alpha4，2026-10-05。这是试装候选，不是生产通过记录。
+版本 4.0.0-alpha5-dev，2026-10-06。主方案暂停普通用户试用；这是维护候选，不是故障根因已解决或生产验收通过记录。
 
 alpha1 已在用户真实 VPS 上暴露首次终端输入失败；此前 35 项测试没有覆盖真实控制终端，不能用当时 CI 通过否认该缺陷。alpha2 修复 `/dev/tty` 读写方式，增加 6 项 Linux PTY 测试（包括实际 Bash/内嵌 Python 入口）。
 
 [alpha2 固定代码提交 4ed2ba2 的 CI](https://github.com/syubroken/server_proxy_setup/actions/runs/36864449181) 已全部通过：35 项回归、6 项 Linux PTY 测试、Bash/ShellCheck、Nginx/systemd 配置与隔离内核网络检查。PTY 中确实重现旧版 r+ 异常，并验证新入口、连续输入、取消和中断。没有执行真实 WARP 注册或真实 VPS 安装。
 
-当前安装脚本 SHA-256：`72f97b6c6fb82e128e652ccc326d3777616a9adb67f4d8167d47164f61c8e28a`。只读诊断脚本 SHA-256：`bb852732274cdce93e22017ff8eff3732936cf57a6700b1ccec03c0048b38941`。诊断脚本已过 Bash/ShellCheck，不能代替真实服务器上的故障诊断结果。
+历史 alpha4 安装脚本 SHA-256：`72f97b6c6fb82e128e652ccc326d3777616a9adb67f4d8167d47164f61c8e28a`。只读诊断脚本 SHA-256：`bb852732274cdce93e22017ff8eff3732936cf57a6700b1ccec03c0048b38941`。诊断脚本已过 Bash/ShellCheck，不能代替真实服务器上的故障诊断结果。
+
+## alpha5-dev 启动等待与诊断
+
+维护候选脚本 SHA-256：`6e9dca6e309930705f7c8de5996586a26f726b0f958e5a0527b4f1cee6554342`。不提供新的普通用户安装入口。
+
+新增 `tests/test_startup.py`，覆盖：真实子进程命令超时、失败阶段保存、进程更换后读取记录、诊断字段过滤、写日志失败、SSH 输出关闭，以及 Linux 真实跨进程锁竞争。锁测试对比旧阻塞 flock 与有限等待、锁释放后继续、异常后释放，以及 deadline 检查遇占锁退出后可重试。
+
+验证进度：本地 Windows 检查通过；Linux 真实锁和完整 Debian CI 尚待本提交运行确认。systemd 检查解析服务与 drop-in，不运行真实服务管理器。没有注册 WARP、操作 VPS 或修改 DNS；不能用这些测试证明此次半小时无输出的根因已修复。
+
+本轮未改动旧修正版和原始 legacy 脚本。旧修正版安装成功来自用户实际反馈；未来证书续期与长期稳定性仍不能由一次安装成功替代。
 
 ## alpha4 路由兼容性修复
 

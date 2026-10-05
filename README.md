@@ -1,74 +1,16 @@
 # server_proxy_setup
 
-个人 Debian VPS 代理脚本。当前方向：**保留 V2Ray + VMess/WebSocket/TLS + Nginx，使用官方 WARP，修好证书自动续期。** 不需要 Zero Trust、Cloudflare API Key 或复杂菜单。
+个人 Debian VPS 代理脚本。方向仍是 V2Ray + VMess/WebSocket/TLS + Nginx 和官方 WARP。
 
-**当前精简版 4.0.0-alpha4 是试装候选，还没有在真实干净 VPS 上完成完整验收。不要在正在使用的代理服务器上叠加执行。** 历史脚本及其已知问题保留在 [`legacy/`](legacy/README.md)。
+**2026-10-06：主方案暂停普通用户重装试用。** alpha4 在真实 VPS 上出现启动 WARP 后至少半小时无新输出，尚未查明是安装进程等待，还是 SSH 输出中断。此前自动检查通过不代表实际安装可用。
 
-alpha1 已因终端输入缺陷撤回：正常 SSH 会话也可能报“需要交互 SSH 终端”。不要再使用旧提交 `12dbb25` 的安装命令；alpha2 修复此问题。它发生在域名输入前，本身不要求重装系统。已经装回旧方案的服务器先保持现状。详见[故障处理](docs/TROUBLESHOOTING.md)。
+当前 `setup_script.sh` 是 **4.0.0-alpha5-dev 维护候选**，增加有限锁等待、分步记录和恢复路径保护，不代表已修复这次故障。这里暂时撤下主方案的一键安装命令，避免继续拿正在使用的 VPS 反复重装验证。
 
-如果你选择主方案失败后再次重装 Debian，临时恢复原来的代理，使用[旧方案修正版](legacy/FIXED.md)。这是单独的无 WARP 备选；不要求先做快照或导出备份，不叠加到新版半成品上。
+已通过旧修正版恢复联网的服务器继续保持使用；无需现在购买新 VPS、改域名或执行诊断命令。下次确实需要干净重装恢复时，使用已有的[旧方案修正版入口](legacy/FIXED.md)。该备用方案不安装 WARP，不能替代主方案出口验收；本轮未修改两份 legacy 脚本。
 
-## 从哪里开始
+故障证据、改动与尚未验证的内容见[故障处理](docs/TROUBLESHOOTING.md)和[验证记录](docs/VALIDATION.md)。主方案恢复推荐前，需要在可保留现场的干净环境中完成真实 WARP/SSH 共存、出口与恢复检查，不能只看 CI 绿色。
 
-本仓库只有一个新版入口：[`setup_script.sh`](setup_script.sh)。脚本从 GitHub 下载到 VPS 后用 Bash 执行，内含 Python 标准库逻辑，不需要 pip。
-
-可以使用新的 VPS，也可以按你的选择在供应商面板重装原 VPS 为干净 Debian。先确认供应商控制台可以进入服务器、自己的 SSH 公钥可以登录，再开始安装。下载命令在干净 VPS 的 root SSH 会话中运行，不是在本地 Windows 中运行。
-
-下面的命令只在**已选定的干净 Debian 13 amd64 测试 VPS** 中运行。整段复制到 root SSH 会话即可；先核对文件摘要并预检，通过后才进入安装：
-
-```bash
-(
-set -euo pipefail
-# BEGIN APT WAIT
-# Retry only lock contention. Never delete locks or interrupt their owner.
-apt_wait() {
-    local log status started=$SECONDS
-    log=$(mktemp)
-    while true; do
-        if LC_ALL=C DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get \
-            -o DPkg::Lock::Timeout=0 -o Dpkg::Options::=--force-confdef \
-            -o Dpkg::Options::=--force-confold -o APT::Update::Error-Mode=any "$@" >"$log" 2>&1; then
-            cat "$log"; rm -f -- "$log"; return 0
-        else
-            status=$?
-        fi
-        if ! grep -Eq '^E: (Could not get lock |Unable to acquire .*lock|Unable to lock directory )' "$log"; then
-            cat "$log" >&2; rm -f -- "$log"; return "$status"
-        fi
-        if (( SECONDS - started >= 600 )); then
-            cat "$log" >&2; rm -f -- "$log"
-            printf '%s\n' '停止：等待软件安装锁超过 10 分钟。后台任务仍在运行；不要删除锁、杀进程或重装。稍后重跑同一脚本。' >&2
-            return "$status"
-        fi
-        printf '%s\n' '系统后台正在使用 apt/dpkg，自动等待 5 秒后继续（最多 10 分钟）；无需另开窗口运行 apt。'
-        sleep 5
-    done
-}
-# END APT WAIT
-apt_wait update
-apt_wait install -y ca-certificates curl python3
-curl --proto '=https' --tlsv1.2 -fsSLo /root/setup_script.sh https://raw.githubusercontent.com/syubroken/server_proxy_setup/df845c6b1c7cedcf75192808125b04259e69d51f/setup_script.sh
-printf '%s  %s\n' '72f97b6c6fb82e128e652ccc326d3777616a9adb67f4d8167d47164f61c8e28a' '/root/setup_script.sh' | sha256sum -c -
-bash /root/setup_script.sh check
-bash /root/setup_script.sh
-)
-```
-
-alpha4 在保留安装锁和下载修复的基础上，修正原生 IPv6 路由文本回放，并显示脱敏 ip 错误详情。真实 Debian 隔离网络已重现旧版 expires/255 并验证修复，仍不是 VPS 全流程验收。
-
-安装锁等待与官方下载诊断：入口准备和脚本内部都自动等待 apt/dpkg 锁，最多 10 分钟；仅在锁竞争时重试，不删除锁或杀进程。命令较长是为了把等待逻辑一并带上，整段复制即可，不需要先执行旧方案的几条 apt 命令。
-
-官方公开文件最多下载三次，传输故障会尝试 IPv4；TLS、403/404/429 或摘要错误立即停止并报告具体类别。先校验文件，再屏蔽服务、安装整套依赖。基础准备会安装/更新 python3、curl 和 ca-certificates；不需要 Cloudflare API 凭据。离线检查和真实 Debian 锁检查见 [验证记录](docs/VALIDATION.md)，不等于真实 VPS 全流程通过。
-
-正常流程会依次询问代理域名、证书联系邮箱和 `TRIAL` 确认（按提示输入大写 TRIAL 并回车，表示继续试装）。切换 WARP 后按提示另开一次新的 SSH 登录，执行屏幕显示的 `confirm-ssh` 命令，原窗口会自动继续。不要关闭原窗口或复用原连接冒充新连接。服务器检查通过后才显示测试节点。
-
-首次试装先选定测试机器和时间；你只需：
-
-1. 在供应商面板装干净 Debian 13 amd64，使用自己的 SSH 公钥登录；私钥留在本地。
-2. 为新 VPS 准备独立测试子域名：一个 DNS-only A 记录指向新机器，同名没有 AAAA；不要改现用节点的域名记录。供应商防火墙需允许 SSH 以及 TCP 80/443，TCP 80 后续也要保留用于续期。脚本不改 DNS 或供应商防火墙。
-3. 运行本页的固定下载入口，输入域名、证书联系邮箱，并确认试装。安装器会声明 WARP/证书服务条款的使用。
-4. 脚本提示时，从本地另开一次 SSH 登录确认仍能进服务器。这是一次额外连接检查，不要求始终保持窗口在前台。
-5. 服务器检查通过才显示测试节点；随后用 v2rayN 或 Shadowrocket 导入验证。
+下面是候选设计和维护说明，**不表示可以开始新一轮安装**。
 
 ## 自动完成什么
 

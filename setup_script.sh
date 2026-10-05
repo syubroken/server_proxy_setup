@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# senyz-proxy-simple 4.0.0-alpha4. Nginx + acme.sh + official consumer WARP. Trial only.
+# senyz-proxy-simple 4.0.0-alpha5-dev. Maintenance candidate; ordinary retries paused.
 # The Bash entry embeds its Python standard-library runtime; no pip is used.
 set -euo pipefail
 set +x
@@ -84,7 +84,7 @@ import tempfile
 import time
 import zipfile
 
-VERSION = '4.0.0-alpha4'
+VERSION = '4.0.0-alpha5-dev'
 SELF = Path(sys.argv[1]).resolve()
 BASE = Path('/var/lib/senyz-proxy-simple')
 ETC = Path('/etc/senyz-proxy-simple')
@@ -112,6 +112,24 @@ DOWNLOADS = {
     'acme.sh': ('https://raw.githubusercontent.com/acmesh-official/acme.sh/807da6498377ee5e0cf43a78091f46f12dc59a89/acme.sh', 'c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7'),
 }
 ACTIVE_TRANSACTION = False
+STEPS = {
+    'guard': '准备管理路由与业务阻断',
+    'service-start': '解除保护性屏蔽并提交 WARP 启动请求',
+    'cli-ready': '等待 WARP 本地控制接口（约 45 秒内）',
+    'disconnect': '确认注册前处于断开状态',
+    'registration-check': '读取已有注册状态',
+    'registration-new': '执行本轮唯一一次注册请求（命令上限 45 秒）',
+    'registration-verify': '确认注册结果',
+    'configure': '设置 WARP 模式与 MASQUE',
+    'connect': '提交 WARP 连接请求（命令上限 12 秒）',
+    'egress': '等待连接并验证双栈业务出口',
+    'transaction-lock': '等待网络事务锁',
+    'recovery': '安全停止',
+    'recovery-proxy': '停止代理服务',
+    'recovery-warp': '停止 WARP 服务',
+    'recovery-network': '恢复原生管理网络',
+}
+EVENTS = {'start', 'done', 'failed', 'waiting', 'acquired', 'timeout'}
 
 
 class Stop(Exception):
@@ -119,7 +137,62 @@ class Stop(Exception):
 
 
 def say(message):
-    print(message, flush=True)
+    try:
+        print(message, flush=True)
+    except OSError:
+        # A closed SSH output must not skip the recovery path.
+        pass
+
+
+def record_step(step, event):
+    # Fixed identifiers only: never commands, CLI output, journals or credentials.
+    if step not in STEPS or event not in EVENTS or not STATE.is_file():
+        return
+    row = {'at': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
+           'pid': os.getpid(), 'step': step, 'event': event}
+    try:
+        fd = os.open(BASE / 'steps.jsonl', os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                     | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0), 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(json.dumps(row, separators=(',', ':')) + '\n')
+    except OSError:
+        # Logging failure must not prevent fail-closed recovery.
+        pass
+
+
+@contextlib.contextmanager
+def step(name):
+    record_step(name, 'start')
+    say('WARP 步骤：' + STEPS[name])
+    try:
+        yield
+    except BaseException:
+        record_step(name, 'failed')
+        raise
+    record_step(name, 'done')
+    say('已完成：' + STEPS[name])
+
+
+def recent_steps():
+    try:
+        with open(BASE / 'steps.jsonl', 'rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 16384))
+            lines = stream.read().splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+            stamp = row.get('at', '')
+            if (row.get('step') in STEPS and row.get('event') in EVENTS
+                    and isinstance(row.get('pid'), int) and isinstance(stamp, str)
+                    and re.fullmatch(r'[0-9T:+.\-]{19,35}', stamp)):
+                rows.append({key: row[key] for key in ('at', 'pid', 'step', 'event')})
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return rows[-40:]
 
 
 def run(args, *, check=True, timeout=30, data=None, env=None):
@@ -534,15 +607,30 @@ def create_user(name, home):
 
 
 @contextlib.contextmanager
-def lock(name='operation.lock', nonblocking=True):
+def lock(name='operation.lock', nonblocking=True, timeout=30):
     if not STATE.is_file():
         raise Stop('本项目尚未初始化；没有创建目录或锁文件。')
     with open(BASE / name, 'a') as f:
         os.chmod(f.name, 0o600)
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
-        except BlockingIOError:
-            raise Stop('另一个操作仍在运行；没有并行更改配置。') from None
+        deadline = time.monotonic() + timeout
+        waiting = False
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if nonblocking:
+                    raise Stop('另一个操作仍在运行；没有并行更改配置。') from None
+                if not waiting:
+                    record_step('transaction-lock', 'waiting')
+                    waiting = True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    record_step('transaction-lock', 'timeout')
+                    raise Stop('网络事务锁等待超时；未删除锁或并行修改。保留状态等待诊断。') from None
+                time.sleep(min(0.2, remaining))
+        if waiting:
+            record_step('transaction-lock', 'acquired')
         yield
 
 
@@ -585,6 +673,7 @@ Before=warp-svc.service {PROXY_SERVICE} {NGINX_SERVICE}
 [Service]
 Type=oneshot
 ExecStart=/bin/bash {SCRIPT} internal-guard
+TimeoutStartSec=60
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
@@ -651,7 +740,9 @@ Unit=sps-{name}.service
 [Install]
 WantedBy=timers.target
 """)
-    unit_write('warp-svc.service.d/50-sps-guard.conf', '[Unit]\nRequires=sps-guard.service\nAfter=sps-guard.service\n')
+    unit_write('warp-svc.service.d/50-sps-guard.conf',
+               '[Unit]\nRequires=sps-guard.service\nAfter=sps-guard.service\n'
+               '[Service]\nTimeoutStartSec=45\nTimeoutStopSec=40\n')
 
 
 def prepare():
@@ -822,6 +913,7 @@ def safe_stop(reason='user-request', boot=False):
 def safe_stop_locked(reason='user-request', boot=False):
     global ACTIVE_TRANSACTION
     require_root()
+    record_step('recovery', 'start')
     s = load(STATE)
     errors = []
     state_update(stage='safe-stopped', ready=False, stopped_reason=reason, recovery_errors=['in-progress'])
@@ -831,22 +923,27 @@ def safe_stop_locked(reason='user-request', boot=False):
     cancelled['cancelled'] = True
     save(PENDING, cancelled)
     if not boot:
+        record_step('recovery-proxy', 'start')
         for service in (PROXY_SERVICE, NGINX_SERVICE):
             run(['systemctl', 'stop', service], check=False, timeout=45)
         if run(['systemctl', 'is-active', PROXY_SERVICE], check=False).returncode == 0:
             run(['systemctl', 'kill', '--kill-whom=all', '--signal=SIGKILL', PROXY_SERVICE], check=False)
             if run(['systemctl', 'is-active', PROXY_SERVICE], check=False).returncode == 0:
                 raise Stop('代理进程尚未确认停止；保留 WARP，不撤掉其出口。需要诊断。')
+        record_step('recovery-proxy', 'done')
     if s.get('proxy_uid'):
         try:
             nft_apply()
         except Stop:
             errors.append('guard')
     if not boot:
+        record_step('recovery-warp', 'start')
         run(['systemctl', 'stop', 'warp-svc.service'], check=False, timeout=45)
         run(['systemctl', 'mask', 'warp-svc.service'], check=False)
         if run(['systemctl', 'is-active', 'warp-svc.service'], check=False).returncode == 0:
             raise Stop('WARP 服务未确认停止；保留恢复标记，不能报告恢复完成。')
+        record_step('recovery-warp', 'done')
+    record_step('recovery-network', 'start')
     clear_own_routes()
     try:
         restore_dns()
@@ -858,7 +955,10 @@ def safe_stop_locked(reason='user-request', boot=False):
     state_update(recovery_errors=errors)
     ACTIVE_TRANSACTION = False
     if errors:
+        record_step('recovery', 'failed')
         raise Stop('代理已要求停止，但恢复检查未全部通过；请保留供应商救援入口并导出诊断。')
+    record_step('recovery-network', 'done')
+    record_step('recovery', 'done')
     if not boot:
         say('已进入安全停止：代理不交付，WARP 已停止；请用新的 SSH 登录确认管理可达。')
 
@@ -1032,67 +1132,82 @@ def verify_blocking_without_tunnel():
 
 def connect_warp():
     say('检查官方 WARP；注册最多调用一次，发现限流即停止。')
-    nft_apply()
-    say('准备原生 SSH 管理路由；此步骤通过后才启动 WARP。')
-    management_routes()
-    verify_blocking_without_tunnel()
-    assert_transaction()
-    run(['systemctl', 'reset-failed', 'sps-guard.service', 'warp-svc.service'], check=False)
-    run(['systemctl', 'start', 'sps-guard.service'])
+    with step('guard'):
+        nft_apply()
+        say('准备原生 SSH 管理路由；此步骤通过后才启动 WARP。')
+        management_routes()
+        verify_blocking_without_tunnel()
+        assert_transaction()
+        run(['systemctl', 'reset-failed', 'sps-guard.service', 'warp-svc.service'], check=False)
+        run(['systemctl', 'start', 'sps-guard.service'])
     say('管理路由及业务阻断检查通过，开始启动官方 WARP。')
     started = int(time.time())
-    with lock('transaction.lock', nonblocking=False):
-        assert_transaction()
-        run(['systemctl', 'unmask', 'warp-svc.service'])
-        run(['systemctl', 'start', '--no-block', 'warp-svc.service'])
-    deadline = time.monotonic() + 35
-    while True:
-        assert_transaction()
-        p = run(['warp-cli', '--accept-tos', 'status'], check=False, timeout=8)
-        if p.returncode == 0 or re.search(r'registration (?:missing|not found)|not registered', p.stdout + p.stderr, re.I):
-            break
-        if time.monotonic() >= deadline:
-            raise Stop('WARP 服务未就绪；停止，不尝试注册。')
-        time.sleep(2)
-    p = run(['warp-cli', '--accept-tos', 'disconnect'], check=False, timeout=8)
-    if p.returncode and not re.search(r'registration (?:missing|not found)|not registered', p.stdout + p.stderr, re.I):
-        raise Stop('不能确认 WARP 已断开；停止注册准备。')
-    registration = run(['warp-cli', '--accept-tos', 'registration', 'show'], check=False, timeout=10)
-    missing = bool(re.search(r'missing|not registered|does not exist', registration.stdout + registration.stderr, re.I))
-    if registration.returncode and not missing:
-        raise Stop('注册状态查询失败；不把未知错误当作需要新注册。')
+    with step('service-start'):
+        with lock('transaction.lock', nonblocking=False):
+            assert_transaction()
+            run(['systemctl', 'unmask', 'warp-svc.service'])
+            run(['systemctl', 'start', '--no-block', 'warp-svc.service'])
+    with step('cli-ready'):
+        deadline = time.monotonic() + 35
+        while True:
+            assert_transaction()
+            p = run(['warp-cli', '--accept-tos', 'status'], check=False, timeout=8)
+            if p.returncode == 0 or re.search(r'registration (?:missing|not found)|not registered', p.stdout + p.stderr, re.I):
+                break
+            if time.monotonic() >= deadline:
+                raise Stop('WARP 服务未就绪；停止，不尝试注册。')
+            say('仍在等待 WARP 本地控制接口；尚未开始注册。')
+            time.sleep(2)
+    with step('disconnect'):
+        p = run(['warp-cli', '--accept-tos', 'disconnect'], check=False, timeout=8)
+        if p.returncode and not re.search(r'registration (?:missing|not found)|not registered', p.stdout + p.stderr, re.I):
+            raise Stop('不能确认 WARP 已断开；停止注册准备。')
+    with step('registration-check'):
+        registration = run(['warp-cli', '--accept-tos', 'registration', 'show'], check=False, timeout=10)
+        missing = bool(re.search(r'missing|not registered|does not exist', registration.stdout + registration.stderr, re.I))
+        if registration.returncode and not missing:
+            raise Stop('注册状态查询失败；不把未知错误当作需要新注册。')
     if missing:
         if load(STATE).get('registration_attempted'):
             raise Stop('已尝试过注册，不能自动重复；需诊断后明确允许重试。')
-        state_update(registration_attempted=True)
-        p = run(['warp-cli', '--accept-tos', 'registration', 'new'], check=False, timeout=45)
-        journal = run(['journalctl', '-u', 'warp-svc.service', '--since', '@' + str(started),
-                       '-n', '120', '--no-pager', '-o', 'cat'], check=False, timeout=8).stdout
-        if re.search(r'\b429\b|Too Many Requests|rate.limit', p.stdout + p.stderr + journal, re.I):
-            state_update(registration_blocked=True)
-            raise Stop('WARP 注册限流；已停止本轮，不删除注册或循环重试。')
-        if p.returncode:
-            raise Stop('官方 WARP 注册未通过；保留状态等待诊断。')
-    registration = run(['warp-cli', '--accept-tos', 'registration', 'show'], check=False, timeout=10)
-    if registration.returncode or re.search(r'missing|not registered|does not exist', registration.stdout, re.I):
-        raise Stop('未能确认 WARP 注册。')
-    for args in (['mode', 'warp+doh'], ['tunnel', 'protocol', 'set', 'MASQUE']):
-        run(['warp-cli', '--accept-tos', *args], timeout=12)
-    with lock('transaction.lock', nonblocking=False):
-        assert_transaction()
-        run(['warp-cli', '--accept-tos', 'connect'], timeout=12)
-    deadline = time.monotonic() + 90
-    while time.monotonic() < deadline:
-        assert_transaction()
-        status = run(['warp-cli', '--accept-tos', 'status'], check=False, timeout=8)
-        if status.returncode == 0 and re.search(r'\bConnected\b', status.stdout):
-            business_routes()
-            verify_warp_context()
-            state_update(registration_blocked=False, warp_verified_at=time.time())
-            say('IPv4/IPv6 代理业务的 WARP 出口检查通过。')
-            return
-        time.sleep(3)
-    raise Stop('WARP 连接未在限时内通过；停止。')
+        with step('registration-new'):
+            state_update(registration_attempted=True)
+            p = run(['warp-cli', '--accept-tos', 'registration', 'new'], check=False, timeout=45)
+            journal = run(['journalctl', '-u', 'warp-svc.service', '--since', '@' + str(started),
+                           '-n', '120', '--no-pager', '-o', 'cat'], check=False, timeout=8).stdout
+            if re.search(r'\b429\b|Too Many Requests|rate.limit', p.stdout + p.stderr + journal, re.I):
+                state_update(registration_blocked=True)
+                raise Stop('WARP 注册限流；已停止本轮，不删除注册或循环重试。')
+            if p.returncode:
+                raise Stop('官方 WARP 注册未通过；保留状态等待诊断。')
+    with step('registration-verify'):
+        registration = run(['warp-cli', '--accept-tos', 'registration', 'show'], check=False, timeout=10)
+        if registration.returncode or re.search(r'missing|not registered|does not exist', registration.stdout, re.I):
+            raise Stop('未能确认 WARP 注册。')
+    with step('configure'):
+        for args in (['mode', 'warp+doh'], ['tunnel', 'protocol', 'set', 'MASQUE']):
+            run(['warp-cli', '--accept-tos', *args], timeout=12)
+    with step('connect'):
+        with lock('transaction.lock', nonblocking=False):
+            assert_transaction()
+            run(['warp-cli', '--accept-tos', 'connect'], timeout=12)
+    with step('egress'):
+        deadline = time.monotonic() + 90
+        next_notice = 0.0
+        while time.monotonic() < deadline:
+            assert_transaction()
+            status = run(['warp-cli', '--accept-tos', 'status'], check=False, timeout=8)
+            if status.returncode == 0 and re.search(r'\bConnected\b', status.stdout):
+                business_routes()
+                verify_warp_context()
+                state_update(registration_blocked=False, warp_verified_at=time.time())
+                say('IPv4/IPv6 代理业务的 WARP 出口检查通过。')
+                return
+            if time.monotonic() >= next_notice:
+                say('仍在等待 WARP 连接；尚未通过出口验收。')
+                next_notice = time.monotonic() + 10
+            time.sleep(3)
+        raise Stop('WARP 连接未在限时内通过；停止。')
 
 
 def tls_websocket(staging=False):
@@ -1474,6 +1589,7 @@ def diagnostics():
                                   'health_at', 'health_failures', 'registration_blocked', 'recovery_errors', 'acceptance',
                                   'certificate_ok', 'certificate_checked_at', 'certificate_expires_at')}
     report['pending'] = PENDING.exists()
+    report['recent_steps'] = recent_steps()
     report['disk_free_bytes'] = shutil.disk_usage('/').free
     report['reboot_required'] = Path('/var/run/reboot-required').exists()
     report['guard_table_present'] = nft_is_present() if s.get('prepared') else False
@@ -1555,6 +1671,7 @@ def interrupted(signum, frame):
 if __name__ == '__main__':
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     try:
         main(sys.argv[2:])
     except Exception as exc:
