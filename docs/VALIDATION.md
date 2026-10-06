@@ -1,6 +1,31 @@
 # 精简版验证边界
 
-版本 4.0.0-alpha5-dev，2026-10-06。主方案暂停普通用户试用；这是维护候选，不是故障根因已解决或生产验收通过记录。
+当前版本 4.0.0-alpha6-dev，2026-10-07（北京时间）。专用测试机进入客户端试用；仍不等于可推荐正式服务器重装。
+
+
+## alpha6-dev 专用 Vultr 实机记录
+
+脚本 SHA-256：`b510d7fe17d7b1b7c51ea26cd6c3504f317cfd89db9db7fe490a19c8906b3b1d`。Debian 13 amd64，官方 WARP 2026.7.1377.0 / MASQUE，V2Ray 5.53.0。使用测试子域名；现用服务器、正式域名记录和用户客户端未修改。测试时间跨 UTC 10 月 6 日与北京时间 10 月 7 日。
+
+| 验证项目 | 结果与边界 |
+| --- | --- |
+| WARP 注册和连接 | 官方客户端成功注册一次；没有删除注册重试。IPv4、IPv6 业务 trace 均为 WARP on |
+| 管理入口 | 原配置现场复现新 SSH 超时；独立定时救援成功恢复，无需重装。官方全地址分流排除 + 业务 UID 路由修正后，新 SSH 多次通过 |
+| VMess/WSS/TLS + DNS | 服务器完整链通过 IPv4、IPv6 和域名请求；临时探针保留证书验证 |
+| Windows 公网探针 | 独立 V2Ray core 5.53.0，域名/IPv4/IPv6 均 WARP on、当时地区 US；Google 和 YouTube generate_204 返回 204。未改 v2rayN，也不等同于完整网站/视频/AI 使用 |
+| 真实 WARP 断开 | 业务 IPv4、IPv6、显式绑定原生源地址的请求均失败；root 原生联网仍成功，没有原生业务回退 |
+| 重新连接 | 首次发现业务路由随隧道接口消失。修正后由真实健康定时器在 28.9 秒内恢复完整链，没有手动补路由；持续失败三次仍停止代理、进入 needs-repair |
+| 正常重启 | 首次暴露 DHCP 就绪时序问题；加入有时限的地址/默认路由等待后，第二次实际重启通过。新 boot ID、新 SSH、服务、双栈及完整链均核对；无需人工恢复 |
+| 证书 | 测试 CA、正式签发通过；测试子域名仅做一次主动正式续期，序列号发生变化，Nginx 实际提供新证书，正常续期动作也通过。没有靠重复强制签发试错 |
+| 防火墙 | 保留 Vultr 镜像自带 UFW；只添加 80/443。最终脚本识别此种配置，未知防火墙继续拒绝 |
+| 最终脚本全新安装 | **尚未完成**。初始干净镜像使用了经审核的 UFW 预检夹具，后续为现场迁移和真实 repair 流程；不得写成最终 alpha6 原样一键安装成功 |
+| 用户实际客户端/长期运行 | **尚未完成**。v2rayN 界面、Shadowrocket、AI 登录/流式响应、空闲恢复和长期自然续期仍需验证 |
+
+本机自动测试：Windows 87 项中 67 项执行通过、20 项 Linux 专用检查跳过。测试 VPS 上 5 项新回归与隔离网络命名空间路由检查通过；后者重现 WARP 选择更早规则优先级及原生/业务分离。完整干净 Debian 13 检查由本次 PR 的 CI 执行，结果以具体 run 为准。已装 WARP 的 VPS 不适合直接运行要求干净文件系统的旧安装器测试；未为测试删除实际 WARP 文件。
+
+每次普通安装/repair 仍将真实断线、重启、续期和客户端字段初始化为 false。此专用测试机依据实际记录单独标记前三项 true，`real_clients` 保持 false；不会由自动安装器普遍宣称已完成这些演练。
+
+尚需补充最终脚本原样干净安装、未提交/安全停止状态重启、IPv6 单独故障和既有长连接实测。此前模拟检查不是这些场景的实机证据。
 
 alpha1 已在用户真实 VPS 上暴露首次终端输入失败；此前 35 项测试没有覆盖真实控制终端，不能用当时 CI 通过否认该缺陷。alpha2 修复 `/dev/tty` 读写方式，增加 6 项 Linux PTY 测试（包括实际 Bash/内嵌 Python 入口）。
 
@@ -8,9 +33,9 @@ alpha1 已在用户真实 VPS 上暴露首次终端输入失败；此前 35 项�
 
 历史 alpha4 安装脚本 SHA-256：`72f97b6c6fb82e128e652ccc326d3777616a9adb67f4d8167d47164f61c8e28a`。只读诊断脚本 SHA-256：`bb852732274cdce93e22017ff8eff3732936cf57a6700b1ccec03c0048b38941`。诊断脚本已过 Bash/ShellCheck，不能代替真实服务器上的故障诊断结果。
 
-## alpha5-dev 启动等待与诊断
+## 历史 alpha5-dev 启动等待与诊断
 
-维护候选脚本 SHA-256：`6e9dca6e309930705f7c8de5996586a26f726b0f958e5a0527b4f1cee6554342`。不提供新的普通用户安装入口。
+历史 alpha5 脚本 SHA-256：`6e9dca6e309930705f7c8de5996586a26f726b0f958e5a0527b4f1cee6554342`。不提供新的普通用户安装入口。
 
 新增 `tests/test_startup.py`，覆盖：真实子进程命令超时、失败阶段保存、进程更换后读取记录、诊断字段过滤、写日志失败、SSH 输出关闭，以及 Linux 真实跨进程锁竞争。锁测试对比旧阻塞 flock 与有限等待、锁释放后继续、异常后释放，以及 deadline 检查遇占锁退出后可重试。
 
@@ -61,7 +86,7 @@ systemd 检查解析服务与 drop-in，不运行真实服务管理器。没有�
 
 安装器中固定 URL 和 SHA-256，下载摘要不符即停止。acme.sh 固定脚本摘要为 `c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7`。原始 legacy 摘要由 CI 检查。初始脚本也使用固定提交下载，不用 `curl | bash` 或短链接。
 
-## 尚需真实测试
+## 完整验收清单（部分已由上述实机记录覆盖）
 
 1. 选定干净测试 VPS，核对供应商控制台、公钥登录、系统时间和 DNS；不修改正在使用的机器。
 2. 软件安装先于 WARP 连接；验证官方守护进程的首次启动行为、注册、MASQUE、双栈出口及新的 SSH 登录。
@@ -70,7 +95,7 @@ systemd 检查解析服务与 drop-in，不运行真实服务管理器。没有�
 5. 实际走一次测试 CA 签发，再做正式证书检查；之后在测试环境演练续期和部署 hook，确认新证书被提供，不能只看磁盘文件日期。
 6. v2rayN、iPhone Shadowrocket 分别测试导入、国内直连、AI 流式响应和空闲恢复；Apple Silicon Mac 到手后补测。
 
-脚本只把服务器侧检查通过标为 `client-trial`。真实掉线、重启、续期、客户端字段仍是 `false`；不会把未实测项目勾为通过。
+脚本只把服务器侧检查通过标为 `client-trial`。普通安装不自动把真实掉线、重启、续期或客户端字段勾为通过；专用测试机的人工验收记录见上。
 
 ## 维护实现
 
@@ -86,6 +111,9 @@ systemd 检查解析服务与 drop-in，不运行真实服务管理器。没有�
 
 ## 核对来源
 
+- [Cloudflare 客户端路由与防火墙架构](https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/configure/route-traffic/client-architecture/)
+- [Cloudflare 客户端模式：本地代理请求时限](https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/configure/modes/)
+- [V2Ray 5.53.0 DNS 实际代码](https://github.com/v2fly/v2ray-core/blob/v5.53.0/app/dns/dns.go)
 - [官方 WARP Linux 使用](https://developers.cloudflare.com/warp-client/get-started/linux/)
 - [官方 WARP Debian 软件源](https://pkg.cloudflareclient.com/)
 - [acme.sh 3.1.6](https://github.com/acmesh-official/acme.sh/releases/tag/3.1.6)
