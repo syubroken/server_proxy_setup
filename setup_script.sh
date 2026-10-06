@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# senyz-proxy-simple 4.0.0-alpha5-dev. Maintenance candidate; ordinary retries paused.
+# senyz-proxy-simple 4.0.0-alpha6-dev. Supervised VPS validation candidate.
 # The Bash entry embeds its Python standard-library runtime; no pip is used.
 set -euo pipefail
 set +x
@@ -84,7 +84,7 @@ import tempfile
 import time
 import zipfile
 
-VERSION = '4.0.0-alpha5-dev'
+VERSION = '4.0.0-alpha6-dev'
 SELF = Path(sys.argv[1]).resolve()
 BASE = Path('/var/lib/senyz-proxy-simple')
 ETC = Path('/etc/senyz-proxy-simple')
@@ -99,7 +99,10 @@ SCRIPT = OPT / 'setup_script.sh'
 SYSTEMD = Path('/etc/systemd/system')
 WAN_TABLE = '51881'
 BUSINESS_TABLE = '51882'
-RULE_PREFS = (81, 82, 83, 84)
+# Reserved project priorities. WARP chooses an even earlier rule (80 before the
+# former 81, 39 before 40). Do not try to win that race: official full exclusions
+# are essential so its table falls through to our explicit per-UID routes.
+RULE_PREFS = (40, 41, 42, 43)
 WARP_IF = 'CloudflareWARP'
 PROXY_USER = 'sps-proxy'
 NGINX_USER = 'www-data'
@@ -354,8 +357,11 @@ def validate_inputs(domain, email):
 
 def server_config(client_uuid, ws_path):
     return {
-        'log': {'loglevel': 'error'},
-        'dns': {'servers': ['https+local://1.1.1.1/dns-query'], 'queryStrategy': 'UseIP', 'disableFallback': True},
+        'log': {'loglevel': 'error', 'access': 'none'},
+        # disableFallback=true skips the only server in V2Ray 5.53 when no domain
+        # matcher exists. One explicit DoH server plus the UID firewall provides
+        # the intended isolation; no localhost/system resolver is configured.
+        'dns': {'servers': ['https+local://1.1.1.1/dns-query'], 'queryStrategy': 'UseIP'},
         'inbounds': [{'listen': '127.0.0.1', 'port': 10001, 'protocol': 'vmess',
                       'settings': {'clients': [{'id': client_uuid, 'alterId': 0}]},
                       'streamSettings': {'network': 'ws', 'wsSettings': {'path': ws_path}}}],
@@ -464,6 +470,63 @@ def check_platform():
         raise Stop('需要原生 systemd 虚拟机，不支持容器/WSL。')
 
 
+def reviewed_ufw_rules(payload):
+    """Recognize an isolated UFW/nft backend; never erase or replace its rules."""
+    tables = set()
+    for entry in payload.get('nftables', []):
+        if 'metainfo' in entry:
+            continue
+        if len(entry) != 1:
+            return False
+        kind, item = next(iter(entry.items()))
+        if kind not in ('table', 'chain', 'rule'):
+            return False
+        family = item.get('family')
+        table = item.get('name') if kind == 'table' else item.get('table')
+        if family not in ('ip', 'ip6') or table != 'filter':
+            return False
+        if kind == 'table':
+            tables.add((family, table))
+            continue
+        chain = item.get('name') if kind == 'chain' else item.get('chain')
+        prefix = 'ufw-' if family == 'ip' else 'ufw6-'
+        if chain not in ('INPUT', 'OUTPUT', 'FORWARD') and not str(chain).startswith(prefix):
+            return False
+        if kind == 'rule' and chain in ('INPUT', 'OUTPUT', 'FORWARD'):
+            for expr in item.get('expr', []):
+                if set(expr) == {'counter'}:
+                    continue
+                if set(expr) != {'jump'} or not expr['jump'].get('target', '').startswith(prefix):
+                    return False
+    return tables == {('ip', 'filter'), ('ip6', 'filter')}
+
+
+def firewall_environment():
+    payload = {'nftables': []}
+    if shutil.which('nft'):
+        payload = json.loads(run(['nft', '-j', 'list', 'ruleset']).stdout)
+    populated = any('metainfo' not in row for row in payload['nftables'])
+    if populated:
+        if not shutil.which('ufw') or not reviewed_ufw_rules(payload):
+            raise Stop('已有无法识别的防火墙；停止，不清空或覆盖规则。')
+        defaults = Path('/etc/default/ufw').read_text()
+        for key, value in [('IPV6', 'yes'), ('MANAGE_BUILTINS', 'no'), ('DEFAULT_OUTPUT_POLICY', 'ACCEPT')]:
+            if not re.search(r'^' + key + r'=[\"\']?' + value + r'[\"\']?\s*$', defaults, re.M):
+                raise Stop('UFW 使用了未支持的自定义设置；保留原规则，停止。')
+        for tool in ('iptables', 'ip6tables'):
+            if not shutil.which(tool) or 'nf_tables' not in run([tool, '--version']).stdout:
+                raise Stop('已有 UFW 不是 nft 后端；需单独审核。')
+        if 'Status: active' not in run(['ufw', 'status']).stdout:
+            raise Stop('发现 UFW 残留规则但服务未启用；需单独审核。')
+        return 'ufw'
+    for tool in ('iptables-save', 'ip6tables-save'):
+        if shutil.which(tool):
+            old = run([tool], check=False).stdout
+            if re.search(r'^-A |^:\S+ (?:DROP|REJECT) ', old, re.M):
+                raise Stop('已有独立 iptables 策略；停止，不覆盖未知防火墙。')
+    return 'empty'
+
+
 def clean_check():
     check_platform()
     conflicts = [p for p in ('/etc/nginx', '/etc/caddy', '/etc/v2ray', '/usr/local/etc/v2ray',
@@ -477,18 +540,7 @@ def clean_check():
         raise Stop('检测到已有代理、WARP 或本候选状态；停止，不能叠加旧方案。已有本候选请用 status/resume。')
     if Path('/etc/resolv.conf').is_symlink() or not Path('/etc/resolv.conf').is_file():
         raise Stop('此候选暂只支持普通文件形式的 resolv.conf；需另行审核 DNS 管理器。')
-    if shutil.which('nft'):
-        rules = run(['nft', 'list', 'ruleset']).stdout.strip()
-        if rules:
-            raise Stop('已有 nftables 规则，停止；不能覆盖未知防火墙。')
-    if shutil.which('iptables-save'):
-        old = run(['iptables-save'], check=False).stdout
-        if re.search(r'^-A |^:\S+ (?:DROP|REJECT) ', old, re.M):
-            raise Stop('已有 iptables 策略，停止；不能覆盖未知防火墙。')
-    if shutil.which('ip6tables-save'):
-        old = run(['ip6tables-save'], check=False).stdout
-        if re.search(r'^-A |^:\S+ (?:DROP|REJECT) ', old, re.M):
-            raise Stop('已有 IPv6 防火墙策略，停止。')
+    firewall_environment()
     if any(Path('/etc/systemd/system').glob('sps-*')):
         raise Stop('检测到本项目残留服务，请先诊断；不自动清空。')
     if Path('/etc/apt/sources.list.d/sps-cloudflare.list').exists():
@@ -668,7 +720,7 @@ def write_units():
     unit_write('sps-guard.service', f"""[Unit]
 Description=Protect proxy egress before WARP or proxy startup
 Wants=network-online.target
-After=network-online.target
+After=network-online.target ufw.service
 Before=warp-svc.service {PROXY_SERVICE} {NGINX_SERVICE}
 [Service]
 Type=oneshot
@@ -773,6 +825,10 @@ def prepare():
         if policy.exists() and policy.read_text() == owned_policy:
             policy.unlink()
     run(['systemctl', 'stop', 'warp-svc.service', 'nginx.service'], check=False)
+    if s.get('firewall') == 'ufw':
+        # Preserve provider SSH restrictions and every existing UFW rule.
+        for port in ('80/tcp', '443/tcp'):
+            run(['ufw', 'allow', port])
     if run(['dpkg-query', '-W', '-f=${Version}', 'cloudflare-warp']).stdout.strip() != '2026.7.1377.0':
         raise Stop('WARP 安装版本不匹配。')
     proxy_uid = ensure_user(PROXY_USER, '/nonexistent', 'proxy')
@@ -873,20 +929,20 @@ def management_routes():
     addresses = json.loads(run(['ip', '-j', 'address', 'show', 'dev', dev]).stdout)
     original = s['ssh']['server']
     if not any(a.get('local') == original for row in addresses for a in row.get('addr_info', [])):
-        raise Stop('原公网地址已改变；拒绝重用旧管理路由。')
+        raise Stop('原公网地址尚未就绪或已改变；拒绝重用旧管理路由。')
     plan = native_route_plan()
     clear_own_routes()
     for family in ('-4', '-6'):
         for command in plan[family]:
             run(command)
-        run(['ip', family, 'rule', 'add', 'pref', '81', 'uidrange', f"{s['proxy_uid']}-{s['proxy_uid']}", 'lookup', BUSINESS_TABLE])
-        run(['ip', family, 'rule', 'add', 'pref', '82', 'uidrange', '0-0', 'lookup', WAN_TABLE])
-    run(['ip', '-4', 'rule', 'add', 'pref', '83', 'from', original + '/32', 'lookup', WAN_TABLE])
+        run(['ip', family, 'rule', 'add', 'pref', str(RULE_PREFS[0]), 'uidrange', f"{s['proxy_uid']}-{s['proxy_uid']}", 'lookup', BUSINESS_TABLE])
+        run(['ip', family, 'rule', 'add', 'pref', str(RULE_PREFS[1]), 'uidrange', '0-0', 'lookup', WAN_TABLE])
+    run(['ip', '-4', 'rule', 'add', 'pref', str(RULE_PREFS[2]), 'from', original + '/32', 'lookup', WAN_TABLE])
     # Preserve native IPv6 replies where a native global address exists.
     native6 = [a['local'] for row in addresses for a in row.get('addr_info', [])
                if a.get('family') == 'inet6' and ipaddress.ip_address(a['local']).is_global]
     for address in native6:
-        run(['ip', '-6', 'rule', 'add', 'pref', '83', 'from', address + '/128', 'lookup', WAN_TABLE])
+        run(['ip', '-6', 'rule', 'add', 'pref', str(RULE_PREFS[2]), 'from', address + '/128', 'lookup', WAN_TABLE])
 
 
 def business_routes():
@@ -1112,6 +1168,23 @@ def verify_warp_context():
             raise Stop('代理身份下的 IPv' + str(family) + ' WARP 实际出口未通过。')
 
 
+def configure_native_split():
+    # Let the official daemon allow native server ingress/management. Only our
+    # dedicated business UID is explicitly routed into its tunnel; the nft UID
+    # guard still drops every native fallback, even while WARP is disconnected.
+    for prefix in ('0.0.0.0/0', '::/0'):
+        run(['warp-cli', '--accept-tos', 'tunnel', 'ip', 'add-range', prefix], timeout=12)
+    verify_native_split()
+
+
+def verify_native_split():
+    output = run(['warp-cli', '--accept-tos', 'tunnel', 'ip', 'list'], timeout=10).stdout
+    if not output.startswith('Excluded routes:') or not all(
+            re.search(r'^\s+' + re.escape(prefix) + r'(?:\s|$)', output, re.M)
+            for prefix in ('0.0.0.0/0', '::/0')):
+        raise Stop('官方 WARP 分流未允许原生管理入口；不启动业务。')
+
+
 def verify_blocking_without_tunnel():
     # Run while the official service is stopped, before the first connection.
     # Successful HTTP, regardless of returned warp status, proves an unacceptable bypass.
@@ -1185,6 +1258,7 @@ def connect_warp():
         if registration.returncode or re.search(r'missing|not registered|does not exist', registration.stdout, re.I):
             raise Stop('未能确认 WARP 注册。')
     with step('configure'):
+        configure_native_split()
         for args in (['mode', 'warp+doh'], ['tunnel', 'protocol', 'set', 'MASQUE']):
             run(['warp-cli', '--accept-tos', *args], timeout=12)
     with step('connect'):
@@ -1450,6 +1524,7 @@ def install():
     save(ETC / 'private.json', {'uuid': str(uuid.uuid4()), 'path': '/ray'})
     save(STATE, {'version': VERSION, 'stage': 'preparing', 'ready': False, 'prepared': False,
                  'domain': domain, 'email': email, 'ssh': conn, 'network': network,
+                 'firewall': firewall_environment(),
                  'created': time.time(), 'registration_blocked': False, **trace})
     with lock():
         prepare()
@@ -1476,6 +1551,28 @@ def resume(retry_registration=False):
         deploy_prepared()
 
 
+def wait_native_network(seconds=35):
+    # network-online.target can be reached before dhcpcd obtains the address on
+    # provider images. Wait for the saved IPv4 AND its default route; never invent
+    # a gateway or use an address from the previous boot. The service has its own
+    # 60-second startup bound in addition to this polling deadline.
+    s = load(STATE)
+    dev = s['network']['dev']
+    deadline = time.monotonic() + seconds
+    while True:
+        addresses = run(['ip', '-j', 'address', 'show', 'dev', dev], check=False, timeout=5)
+        routes = run(['ip', '-4', '-j', 'route', 'show', 'default', 'table', 'main'], check=False, timeout=5)
+        if addresses.returncode == routes.returncode == 0:
+            rows = json.loads(addresses.stdout)
+            defaults = json.loads(routes.stdout)
+            if (any(a.get('local') == s['ssh']['server'] for r in rows for a in r.get('addr_info', []))
+                    and len(defaults) == 1 and defaults[0].get('dev') == dev and defaults[0].get('gateway')):
+                return
+        if time.monotonic() >= deadline:
+            raise Stop('等待原生公网地址和默认路由超时；WARP 与代理保持停止，SSH 设置未改动。')
+        time.sleep(1)
+
+
 def internal_guard():
     require_root()
     s = load(STATE)
@@ -1487,6 +1584,7 @@ def internal_guard():
         raise Stop('发现未提交安装后重启；代理和 WARP 启动已阻止，请重新登录后恢复。')
     if s.get('stage') == 'safe-stopped' and not PENDING.exists():
         raise Stop('处于安全停止状态；没有自动连接 WARP。')
+    wait_native_network()
     management_routes()
 
 
@@ -1499,6 +1597,7 @@ def proxy_gate():
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         try:
+            verify_native_split()
             business_routes()
             verify_warp_context()
             return
@@ -1529,6 +1628,11 @@ def health_check():
         return
     with lock():
         try:
+            # Disconnect/reconnect destroys the tunnel interface and the kernel
+            # removes routes attached to it. Recreate only our business default;
+            # the UID firewall remains in force throughout the interruption.
+            verify_native_split()
+            business_routes()
             verify_warp_context()
             healthy = run(['systemctl', 'is-active', PROXY_SERVICE], check=False).returncode == 0
         except Stop:

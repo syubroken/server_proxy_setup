@@ -30,11 +30,28 @@ if __name__ == '__main__':
     assert failed.returncode == 255 and 'expires' in failed.stderr, failed
     print('REPRODUCED alpha3 display replay: exit 255, expires parser error')
 
+    # Real WARP inserts a rule ahead of the project's priorities (80 before 81,
+    # then 39 before 40). Native routes alone are insufficient. Excluding both
+    # complete address families empties this table, allowing explicit UID routes.
+    run(['ip', 'link', 'add', app.WARP_IF, 'type', 'dummy'])
+    run(['ip', 'link', 'set', app.WARP_IF, 'up'])
+    run(['ip', 'addr', 'add', '172.16.0.2/32', 'dev', app.WARP_IF])
+    run(['ip', '-6', 'addr', 'add', '2001:db8:9::2/128', 'dev', app.WARP_IF, 'nodad'])
+    for family in ('-4', '-6'):
+        run(['ip', family, 'route', 'add', 'table', '65743', 'default', 'dev', app.WARP_IF])
+        run(['ip', family, 'rule', 'add', 'pref', str(min(app.RULE_PREFS) - 1),
+             'not', 'fwmark', '0x100cf', 'lookup', '65743'])
+
     with tempfile.TemporaryDirectory(prefix='sps-routes-') as tmp:
         app.STATE = Path(tmp) / 'state.json'
         app.save(app.STATE, {'network': {'dev': 'spsnative'}, 'ssh': {'server': '192.0.2.10'}, 'proxy_uid': 65534})
         before4 = json.loads(run(['ip', '-4', '-j', 'route', 'show', 'table', 'main']).stdout)
         app.management_routes()
+        app.business_routes()
+        for family, target in [('-4', '198.51.100.1'), ('-6', '2001:db8:2::1')]:
+            stolen = json.loads(run(['ip', family, '-j', 'route', 'get', target, 'uid', '0']).stdout)[0]
+            assert str(stolen['table']) == '65743', stolen
+            run(['ip', family, 'route', 'flush', 'table', '65743'])
         for family in ('-4', '-6'):
             rows = json.loads(run(['ip', family, '-j', 'route', 'show', 'table', app.WAN_TABLE]).stdout)
             defaults = [r for r in rows if r.get('dst') == 'default']
@@ -43,11 +60,13 @@ if __name__ == '__main__':
             target = '198.51.100.1' if family == '-4' else '2001:db8:2::1'
             route = json.loads(run(['ip', family, '-j', 'route', 'get', target, 'uid', '0']).stdout)[0]
             assert str(route['table']) == app.WAN_TABLE and route['dev'] == 'spsnative', route
+            business = json.loads(run(['ip', family, '-j', 'route', 'get', target, 'uid', '65534']).stdout)[0]
+            assert str(business['table']) == app.BUSINESS_TABLE and business['dev'] == app.WARP_IF, business
         assert json.loads(run(['ip', '-4', '-j', 'route', 'show', 'table', 'main']).stdout) == before4
         app.management_routes()  # repeated boot/guard setup is safe
         app.clear_own_routes()
         assert not any(r.get('priority') in app.RULE_PREFS for r in json.loads(run(['ip', '-4', '-j', 'rule']).stdout))
-        print('Native IPv4/DHCP and IPv6/RA management routes, repeat and cleanup: PASS')
+        print('Reproduced WARP priority takeover; full split exclusions allow management/business routes: PASS')
 
         # Typical routed /32 VPS: gateway lies outside the assigned address prefix.
         run(['ip', 'addr', 'del', '192.0.2.10/24', 'dev', 'spsnative'])

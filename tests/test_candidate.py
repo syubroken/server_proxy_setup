@@ -237,7 +237,8 @@ class CandidateTest(unittest.TestCase):
         cfg = self.app.server_config('00000000-0000-4000-8000-000000000001', '/test')
         self.assertNotIn('localhost', json.dumps(cfg))
         self.assertEqual(cfg['outbounds'][0]['settings']['domainStrategy'], cfg['dns']['queryStrategy'])
-        self.assertTrue(cfg['dns']['disableFallback'])
+        self.assertNotIn('disableFallback', cfg['dns'])
+        self.assertEqual(len(cfg['dns']['servers']), 1)
         self.assertTrue(cfg['dns']['servers'][0].startswith('https+local://1.1.1.1/'))
         self.assertEqual(cfg['inbounds'][0]['listen'], '127.0.0.1')
 

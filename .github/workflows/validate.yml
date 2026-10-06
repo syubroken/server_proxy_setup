@@ -38,6 +38,7 @@ jobs:
           python3 tests/test_apt_wait.py
           python3 tests/test_routes.py
           python3 tests/test_startup.py
+          python3 tests/test_live_regressions.py
           # Preserve the existing upstream legacy file at 75dd5de; no repairs here.
           test "$(sha256sum legacy/setup_script_legacy.sh | cut -d ' ' -f 1)" = b235ccfa254437bf76f234d69e061100b43ef2fedeacb3b3ef4367ffabc13568
       - name: Real Linux terminal and Bash entry checks
