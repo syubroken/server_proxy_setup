@@ -1,6 +1,6 @@
 # Windows 客户端迁移
 
-更新：2026-10-20。本文是迁移说明，Clash Verge Rev 尚未在本项目用户设备上实测通过。已完成的 v2rayN/Scoop 验收见 [VALIDATION.md](VALIDATION.md)。
+更新：2026-10-20。用户已反馈正在使用 Clash Verge、TUN 已开启，目前没有问题，并自行修改/添加了几条规则。属于实际使用反馈，尚未独立核验当前配置和应用路径。下文保留迁移步骤供参考，用户无需重复迁移；后续以用户当前规则为准，不重新导入旧 YAML 覆盖改动。分项记录见 [VALIDATION.md](VALIDATION.md)。
 
 现有服务器的 VMess + WebSocket + TLS 可由 Mihomo 使用，因此迁移到 Clash Verge Rev 不需要改 VPS、DNS 或证书。服务器 WARP、出口地区和网站账号限制不会因更换本地客户端自动改变。
 

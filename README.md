@@ -6,7 +6,7 @@
 
 当前 `setup_script.sh` 仍为 **4.0.0-alpha6-dev 维护候选**。主服务器全新安装及实际使用已有用户报告；10 月 20 日用户进一步确认：主服务器已重启过一次，目前使用正常（具体重启日期未提供）。安装日志、脚本摘要和重启后服务/双栈状态未在该主机独立复核；主服务器自己的 WARP 断线及续期演练仍待验证，不能沿用 Vultr 的结果。现有主节点继续使用，Vultr 保留备用；补记录不要求重装，也不代表所有环境或长期运行均已验收。
 
-10 月 20 日本机独立验证了 v2rayN 7.25.4 + sing-box 1.14.2 下 Scoop 经 TUN 下载：实际连接使用 TUN 地址、`warp=on`、下载文件摘要及 Git 访问通过。此结果只覆盖当时节点和测试路径；Shadowrocket、Clash Verge Rev、各 AI 站点登录/流式响应及完整 IPv6/DNS 检查仍未分别验收。详见[按主机和客户端区分的记录](docs/VALIDATION.md)及 [Windows 客户端迁移说明](docs/CLIENTS.md)。
+10 月 20 日本机独立验证了 v2rayN 7.25.4 + sing-box 1.14.2 下 Scoop 经 TUN 下载：实际连接使用 TUN 地址、`warp=on`、下载文件摘要及 Git 访问通过。同日用户随后确认已使用 Clash Verge、开启 TUN，目前没有问题，并自行修改/添加了几条规则。Clash 当前配置与应用路径尚未独立核验，不能直接沿用此前 v2rayN/Scoop 的测试结果；后续以用户当前规则为准，不覆盖回最初准备的 YAML。Shadowrocket、各 AI 站点登录/流式响应及完整 IPv6/DNS 检查仍未分别验收。详见[按主机和客户端区分的记录](docs/VALIDATION.md)及 [Windows 客户端迁移说明](docs/CLIENTS.md)。
 
 这次确认并修正了 WARP 路由/防火墙影响管理入口、V2Ray 域名解析失败、重连后业务路由丢失，以及开机 DHCP 尚未就绪的问题。Vultr 自带的已识别 UFW 规则予以保留，只补充 TCP 80/443。详见[验证记录](docs/VALIDATION.md)和[故障处理](docs/TROUBLESHOOTING.md)。之前原故障机已重装，不能把此次发现当作其全部故障的唯一结论。
 

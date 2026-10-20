@@ -14,7 +14,7 @@
 | 主服务器重启，10 月 20 日收到反馈 | 用户反馈 | 用户确认已重启过一次，目前使用没有问题；实际重启日期未提供 | 未独立核对新 boot ID、服务状态、SSH 及双栈 WARP；不等于 WARP 中断或续期演练 |
 | Windows Scoop / v2rayN，10 月 20 日 | 独立实测 | v2rayN 7.25.4、当前 VMess 节点使用 sing-box 1.14.2，Scoop `proxy=none`；真实 TUN 连接、WARP 出口、下载摘要、Git 读取通过 | 不代表全部节点、应用、IPv6/DNS、WSL 或客户端故障时的全机阻断已验证 |
 | iPhone / Apple Silicon Mac Shadowrocket | 尚未验证 | 协议兼容性评估不能代替客户端实测 | 导入、分流、实际访问和恢复 |
-| Clash Verge Rev | 尚未验证 | 已核对官方 Mihomo VMess/WS/TLS 支持，提供迁移说明 | 安装、导入、系统代理、TUN、实际应用访问均需迁移后核验 |
+| Clash Verge / TUN，10 月 20 日收到反馈 | 用户反馈 | 用户已使用 Clash Verge、开启虚拟网卡 TUN，目前没有问题；已自行修改/添加几条规则 | 未独立核对客户端/内核版本、当前节点、实际生效规则、TUN 路由或 Scoop/Git 路径；不自动继承之前 v2rayN 的实测结论 |
 | 各 AI 站点与长期运行 | 部分用户使用反馈，其余尚未验证 | 本对话可用是实际使用反馈 | 不等于 ChatGPT、Claude、AI Studio 的全部登录/模型/流式响应通过，也不证明自然续期或持续无故障 |
 
 主服务器用户收到的固定安装提交为 `4bb05189946dc2eb078187d33aabb91bb716572c`，脚本 SHA-256 为 `b510d7fe17d7b1b7c51ea26cd6c3504f317cfd89db9db7fe490a19c8906b3b1d`；这是当时提供的入口信息，不是后来登录主服务器复核所得。
@@ -22,6 +22,8 @@
 10 月 7 日反馈分别保存在本地 `vultr-client-feedback-2026-10-07.json`、`primary-client-feedback-2026-10-07.json`。本节是公开脱敏摘要，不上传完整客户端配置、UUID、节点链接或私钥。
 
 10 月 20 日新增反馈：“主服务器我已经重启过一次，目前使用没有问题。”本地记录为 `primary-reboot-feedback-2026-10-20.json`。据此将正常重启后的使用结果标为用户确认通过；无需为了补记录再重启一次。本次没有登录服务器或改写远程状态字段。
+
+同日后续反馈：“我现在在使用clash verge，开启了虚拟网卡TUN，目前没什么问题。中间给clash修改和添加了几个规则。”本地记录为 `clash-client-feedback-2026-10-20.json`。已将迁移后的当前使用标为用户确认正常；具体规则改动尚未读取。最初生成并通过解析的 YAML 仅作为迁移准备快照，后续检查/备份应以用户当前配置为准，不覆盖其自定义规则。本次只补记录，没有修改客户端或运行中网络。
 
 ## 2026-10-20 Windows Scoop / TUN 实测
 
@@ -39,7 +41,7 @@
 
 显式本地代理对照请求使用 IPv6，Scoop TUN 请求使用 IPv4，两者均为 WARP；公网 IP 不同不能单独判失败。验收使用实际 TUN 连接、WARP 状态、下载摘要及 Git 结果。原始脱敏结果保存在本地 `scoop-tun-2026-10-20/result.json` 和 `switch-status.json`。
 
-本轮没有重新验收主服务器的故障恢复、续期或全机 IPv6/DNS；也没有安装/启用 Clash Verge Rev。
+上述 Scoop 实测阶段没有重新验收主服务器的故障恢复、续期或全机 IPv6/DNS，也没有安装/启用 Clash Verge Rev；同日稍后的 Clash 使用反馈见顶部矩阵，不能与这一阶段混为一次实测。
 
 依据：[Xray 26.3.27 TUN 配置源码](https://github.com/XTLS/Xray-core/blob/v26.3.27/infra/conf/tun.go)、[v2rayN 7.25.4 发布说明](https://github.com/2dust/v2rayN/releases/tag/7.25.4)。
 
