@@ -4,6 +4,12 @@
 
 现有服务器的 VMess + WebSocket + TLS 可由 Mihomo 使用，因此迁移到 Clash Verge Rev 不需要改 VPS、DNS 或证书。服务器 WARP、出口地区和网站账号限制不会因更换本地客户端自动改变。
 
+## 准备配置中的规则来源
+
+本项目提供的本地导入配置由维护者组合 Mihomo 规则，不是 Clash Verge Rev 无需配置就默认采用的分流策略。局域网部分显式列出常见私有、本地和链路地址范围；国内部分使用 `GEOSITE,cn,DIRECT` 引用 GeoSite 的 cn 域名集合，再用 `GEOIP,CN,DIRECT` 匹配 GeoIP 的中国 IP 数据。具体域名/IP 名单来自规则数据库，并非维护者逐个编写，也不能仅按网站语言判断。
+
+规则按顺序匹配，最后 `MATCH,PROXY` 将其余请求送到所选代理。`DIRECT` 表示客户端直接通过本地网络访问，不经过 VPS/WARP。客户端负责执行这些规则，数据库版本和分类准确性影响结果；不保证所有国内网站、游戏或特殊域名都分类正确。这次仅解释已有配置，没有改变分流行为。
+
 ## 建议流程
 
 1. 保留 v2rayN 和可用节点，不卸载。先通过现有网络下载 [Clash Verge Rev 官方稳定版](https://github.com/clash-verge-rev/clash-verge-rev/releases/latest)。本次核对为 v2.5.8；普通 Windows x64 电脑选择正常 x64 安装包，按安装器默认目录安装。仅在 WebView2 确有问题时考虑内置版本，不单独替换旧内核。
